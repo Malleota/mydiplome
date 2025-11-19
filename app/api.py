@@ -8,7 +8,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import text
 
-from .config import JWT_ACCESS_TOKEN_EXPIRE_MINUTES, PLANT_TYPES_DIR, engine, logger
+from .config import (
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES,
+    PLANT_TYPES_DIR,
+    engine,
+    get_full_static_url,
+    logger,
+)
 from .dependencies import (
     create_access_token,
     get_current_user,
@@ -43,6 +49,23 @@ from .schemas import (
 )
 
 router = APIRouter()
+
+
+def enrich_user_with_avatar_url(user_data: dict, conn) -> dict:
+    """Добавляет avatar_url в данные пользователя на основе avatar_id."""
+    user_dict = dict(user_data)
+    if user_dict.get("avatar_id"):
+        avatar = conn.execute(
+            text("SELECT image_url FROM avatars WHERE id=:id"),
+            {"id": user_dict["avatar_id"]},
+        ).mappings().first()
+        if avatar and avatar["image_url"]:
+            user_dict["avatar_url"] = get_full_static_url(avatar["image_url"])
+        else:
+            user_dict["avatar_url"] = None
+    else:
+        user_dict["avatar_url"] = None
+    return user_dict
 
 
 @router.get("/health")
@@ -116,9 +139,12 @@ def register(payload: UserRegister):
             .mappings()
             .first()
         )
+        
+        # Добавляем avatar_url
+        user_data = enrich_user_with_avatar_url(row, conn)
 
     logger.info("Зарегистрирован новый пользователь: %s (ID: %s)", payload.email, user_id)
-    return UserOut(**row)
+    return UserOut(**user_data)
 
 
 @router.post("/login", response_model=Token)
@@ -172,7 +198,9 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 @router.get("/me", response_model=UserOut)
 def get_current_user_info(current_user: dict = Depends(get_current_user)):
     """Получить информацию о текущем авторизованном пользователе."""
-    return UserOut(**current_user)
+    with engine.connect() as conn:
+        user_data = enrich_user_with_avatar_url(current_user, conn)
+    return UserOut(**user_data)
 
 
 @router.patch("/me/avatar", response_model=UserOut)
@@ -211,9 +239,12 @@ def update_avatar(payload: AvatarUpdate, current_user: dict = Depends(get_curren
             .mappings()
             .first()
         )
+        
+        # Добавляем avatar_url
+        user_data = enrich_user_with_avatar_url(row, conn)
     
     logger.info("Пользователь %s сменил аватарку на %s", current_user["id"], payload.avatar_id)
-    return UserOut(**row)
+    return UserOut(**user_data)
 
 
 @router.get("/avatars", response_model=List[AvatarOut])
@@ -223,7 +254,13 @@ def list_avatars():
         rows = conn.execute(
             text("SELECT id, image_url, name FROM avatars ORDER BY name ASC")
         ).mappings().all()
-        return [AvatarOut(**r) for r in rows]
+        result = []
+        for r in rows:
+            avatar_data = dict(r)
+            # Формируем полный URL
+            avatar_data["image_url"] = get_full_static_url(avatar_data["image_url"])
+            result.append(AvatarOut(**avatar_data))
+        return result
 
 
 # --- Users (Admin only) ---
@@ -272,6 +309,9 @@ def update_user_role(
             .mappings()
             .first()
         )
+        
+        # Добавляем avatar_url
+        user_data = enrich_user_with_avatar_url(updated_user, conn)
 
     logger.info(
         "Роль пользователя %s изменена на %s администратором %s",
@@ -279,7 +319,7 @@ def update_user_role(
         payload.role,
         admin["id"],
     )
-    return UserOut(**updated_user)
+    return UserOut(**user_data)
 
 
 # --- Greenhouses ---
@@ -318,7 +358,13 @@ def list_greenhouses(current_user: dict = Depends(get_current_user)):
             """
             rows = conn.execute(text(sql), {"user_id": current_user["id"]}).mappings().all()
 
-        return [GreenhouseOut(**r) for r in rows]
+        result = []
+        for r in rows:
+            gh_data = dict(r)
+            # Формируем полный URL для изображения
+            gh_data["image_url"] = get_full_static_url(gh_data["image_url"])
+            result.append(GreenhouseOut(**gh_data))
+        return result
 
 
 @router.post("/greenhouses", response_model=GreenhouseOut, status_code=201)
@@ -376,7 +422,12 @@ def create_greenhouse(payload: GreenhouseCreate, admin: dict = Depends(require_a
             .mappings()
             .first()
         )
-    return GreenhouseOut(**row)
+        
+        # Формируем полный URL для изображения
+        gh_data = dict(row)
+        gh_data["image_url"] = get_full_static_url(gh_data["image_url"])
+    
+    return GreenhouseOut(**gh_data)
 
 
 @router.get("/greenhouses/{gh_id}", response_model=GreenhouseOut)
@@ -412,7 +463,12 @@ def get_greenhouse(gh_id: str, current_user: dict = Depends(get_current_user)):
             .first()
         )
         one_or_404(row, "Greenhouse not found")
-        return GreenhouseOut(**row)
+        
+        # Формируем полный URL для изображения
+        gh_data = dict(row)
+        gh_data["image_url"] = get_full_static_url(gh_data["image_url"])
+        
+        return GreenhouseOut(**gh_data)
 
 
 @router.delete("/greenhouses/{gh_id}", status_code=204)
@@ -532,7 +588,13 @@ def list_plant_types(current_user: dict = Depends(get_current_user)):
         """
             )
         ).mappings().all()
-        return [PlantTypeOut(**r) for r in rows]
+        result = []
+        for r in rows:
+            plant_data = dict(r)
+            # Формируем полный URL для изображения
+            plant_data["image_url"] = get_full_static_url(plant_data["image_url"])
+            result.append(PlantTypeOut(**plant_data))
+        return result
 
 
 @router.post("/plant-types/upload-image", status_code=200)
@@ -567,8 +629,9 @@ async def upload_plant_image(
             detail="Ошибка при сохранении файла",
         )
     
-    # Возвращаем URL для использования
-    image_url = f"/static/plant-types/{filename}"
+    # Возвращаем полный URL для использования
+    relative_url = f"/static/plant-types/{filename}"
+    image_url = get_full_static_url(relative_url)
     logger.info("Загружено изображение растения: %s", filename)
     return {"image_url": image_url, "filename": filename}
 
@@ -615,8 +678,13 @@ def create_plant_type(payload: PlantTypeCreate, admin: dict = Depends(require_ad
             .mappings()
             .first()
         )
+        
+        # Формируем полный URL для изображения
+        plant_data = dict(row)
+        plant_data["image_url"] = get_full_static_url(plant_data["image_url"])
+    
     logger.info("Тип растения %s добавлен в справочник", payload.name)
-    return PlantTypeOut(**row)
+    return PlantTypeOut(**plant_data)
 
 
 @router.delete("/plant-types/{pt_id}", status_code=204)

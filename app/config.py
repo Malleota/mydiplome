@@ -1,7 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI
 from fastapi.security import OAuth2PasswordBearer
@@ -36,6 +36,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 # SQLAlchemy engine
 engine = create_engine(DSN, connect_args={"check_same_thread": False}, echo=False)
 
+# Base URL configuration
+BASE_URL = os.getenv("BASE_URL", "http://95.140.158.180:8000")
+
 # Static files configuration
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -47,6 +50,17 @@ GREENHOUSES_DIR = os.path.join(STATIC_DIR, "greenhouses")
 os.makedirs(AVATARS_DIR, exist_ok=True)
 os.makedirs(PLANT_TYPES_DIR, exist_ok=True)
 os.makedirs(GREENHOUSES_DIR, exist_ok=True)
+
+
+def get_full_static_url(relative_path: Optional[str]) -> Optional[str]:
+    """Преобразует относительный путь в полный URL для статических файлов."""
+    if not relative_path:
+        return None
+    if relative_path.startswith("http://") or relative_path.startswith("https://"):
+        return relative_path
+    # Убираем ведущий слэш, если есть, и добавляем BASE_URL
+    path = relative_path.lstrip("/")
+    return f"{BASE_URL.rstrip('/')}/{path}"
 
 
 @event.listens_for(engine, "connect")

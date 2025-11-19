@@ -28,6 +28,7 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     avatar_id: Optional[str] = None
+    avatar_url: Optional[str] = None
     created_at: datetime
 
 
