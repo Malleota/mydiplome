@@ -6,10 +6,28 @@ from sqlalchemy.exc import OperationalError
 logger = logging.getLogger("flowers-api")
 
 
+def get_default_avatars(): 
+    """Возвращает список базовых аватарок для вставки."""
+    # Используем локальные пути на сервере
+    return [
+        ("avatar_1", "/static/avatars/avatar_1.png", "avatar 1"),
+        ("avatar_2", "/static/avatars/avatar_2.png", "avatar 2"),
+        ("avatar_3", "/static/avatars/avatar_3.png", "avatar 3"),
+    ]
+
+
 def get_schema_statements():
     """Возвращает список SQL-запросов для создания таблиц."""
     return [
         # Сначала создаём таблицы без внешних ключей
+        """
+        CREATE TABLE IF NOT EXISTS avatars (
+            id            TEXT NOT NULL PRIMARY KEY,
+            image_url     TEXT NOT NULL,
+            name          TEXT,
+            created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """,
         """
         CREATE TABLE IF NOT EXISTS users (
             id            TEXT NOT NULL PRIMARY KEY,
@@ -18,6 +36,7 @@ def get_schema_statements():
             name          TEXT,
             role          TEXT NOT NULL CHECK(role IN ('admin', 'worker')),
             is_active     INTEGER NOT NULL DEFAULT 1,
+            avatar_id     TEXT,
             created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         """,
@@ -171,10 +190,23 @@ def ensure_schema(engine: Engine, db_path: str = None):
             logger.error(f"Проверьте путь к файлу БД: {db_path}")
         raise
     
+    # Создаём все таблицы (если их нет)
     statements = get_schema_statements()
     with engine.begin() as conn:
         for stmt in statements:
             conn.execute(text(stmt))
+    
+    # Заполняем аватарки, если таблица пустая
+    with engine.begin() as conn:
+        existing_count = conn.execute(text("SELECT COUNT(*) FROM avatars")).scalar()
+        if existing_count == 0:
+            avatars = get_default_avatars()
+            for avatar_id, image_url, name in avatars:
+                conn.execute(
+                    text("INSERT INTO avatars (id, image_url, name) VALUES (:id, :url, :name)"),
+                    {"id": avatar_id, "url": image_url, "name": name}
+                )
+            logger.info(f"Добавлено {len(avatars)} базовых аватарок")
     
     logger.info("Схема базы данных успешно инициализирована")
 

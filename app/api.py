@@ -1,3 +1,4 @@
+import random
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -18,6 +19,8 @@ from .dependencies import (
 )
 from .schemas import (
     AlertOut,
+    AvatarOut,
+    AvatarUpdate,
     BindSensorIn,
     BindWorkerIn,
     GreenhouseCreate,
@@ -64,13 +67,27 @@ def register(payload: UserRegister):
                 detail="Пользователь с таким email уже существует",
             )
 
+        # Получаем случайную аватарку
+        avatars = conn.execute(
+            text("SELECT id FROM avatars")
+        ).fetchall()
+        
+        if not avatars:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Нет доступных аватарок",
+            )
+        
+        random_avatar = random.choice(avatars)
+        avatar_id = random_avatar[0]
+
         password_hash = get_password_hash(payload.password)
 
         conn.execute(
             text(
                 """
-            INSERT INTO users (id, email, password_hash, name, role, is_active)
-            VALUES (:id, :email, :pwd, :name, :role, 1)
+            INSERT INTO users (id, email, password_hash, name, role, avatar_id, is_active)
+            VALUES (:id, :email, :pwd, :name, :role, :avatar_id, 1)
         """
             ),
             {
@@ -79,6 +96,7 @@ def register(payload: UserRegister):
                 "pwd": password_hash,
                 "name": payload.name,
                 "role": payload.role,
+                "avatar_id": avatar_id,
             },
         )
 
@@ -86,7 +104,7 @@ def register(payload: UserRegister):
             conn.execute(
                 text(
                     """
-            SELECT id, email, name, role, is_active, created_at
+            SELECT id, email, name, role, is_active, avatar_id, created_at
             FROM users WHERE id=:id
         """
                 ),
@@ -154,6 +172,57 @@ def get_current_user_info(current_user: dict = Depends(get_current_user)):
     return UserOut(**current_user)
 
 
+@router.patch("/me/avatar", response_model=UserOut)
+def update_avatar(payload: AvatarUpdate, current_user: dict = Depends(get_current_user)):
+    """Смена аватарки текущего пользователя."""
+    with engine.begin() as conn:
+        # Проверяем, что аватарка существует
+        avatar_exists = conn.execute(
+            text("SELECT 1 FROM avatars WHERE id=:id"),
+            {"id": payload.avatar_id},
+        ).scalar()
+        
+        if not avatar_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Аватарка не найдена",
+            )
+        
+        # Обновляем аватарку пользователя
+        conn.execute(
+            text("UPDATE users SET avatar_id=:avatar_id WHERE id=:user_id"),
+            {"avatar_id": payload.avatar_id, "user_id": current_user["id"]},
+        )
+        
+        # Получаем обновленного пользователя
+        row = (
+            conn.execute(
+                text(
+                    """
+            SELECT id, email, name, role, is_active, avatar_id, created_at
+            FROM users WHERE id=:id
+        """
+                ),
+                {"id": current_user["id"]},
+            )
+            .mappings()
+            .first()
+        )
+    
+    logger.info("Пользователь %s сменил аватарку на %s", current_user["id"], payload.avatar_id)
+    return UserOut(**row)
+
+
+@router.get("/avatars", response_model=List[AvatarOut])
+def list_avatars():
+    """Получение списка доступных аватарок."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT id, image_url, name FROM avatars ORDER BY name ASC")
+        ).mappings().all()
+        return [AvatarOut(**r) for r in rows]
+
+
 # --- Users (Admin only) ---
 @router.patch("/users/{user_id}/role", response_model=UserOut)
 def update_user_role(
@@ -165,7 +234,7 @@ def update_user_role(
             conn.execute(
                 text(
                     """
-            SELECT id, email, name, role, is_active, created_at
+            SELECT id, email, name, role, is_active, avatar_id, created_at
             FROM users WHERE id=:id
         """
                 ),
@@ -191,7 +260,7 @@ def update_user_role(
             conn.execute(
                 text(
                     """
-            SELECT id, email, name, role, is_active, created_at
+            SELECT id, email, name, role, is_active, avatar_id, created_at
             FROM users WHERE id=:id
         """
                 ),

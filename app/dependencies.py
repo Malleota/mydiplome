@@ -69,7 +69,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, str]:
             conn.execute(
                 text(
                     """
-            SELECT id, email, name, role, is_active, created_at
+            SELECT id, email, name, role, is_active, avatar_id, created_at
             FROM users WHERE id=:id
         """
                 ),

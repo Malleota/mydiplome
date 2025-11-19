@@ -27,6 +27,7 @@ class UserOut(BaseModel):
     name: Optional[str] = None
     role: str
     is_active: bool
+    avatar_id: Optional[str] = None
     created_at: datetime
 
 
@@ -150,4 +151,14 @@ class ReportOut(BaseModel):
     plant_instance_id: Optional[str] = None
     created_at: datetime
     comment: Optional[str] = None
+
+
+class AvatarUpdate(BaseModel):
+    avatar_id: str
+
+
+class AvatarOut(BaseModel):
+    id: str
+    image_url: str
+    name: Optional[str] = None
 
