@@ -13,7 +13,7 @@ def get_default_avatars():
         ("avatar_1", "/static/avatars/avatar_1.png", "avatar 1"),
         ("avatar_2", "/static/avatars/avatar_2.png", "avatar 2"),
         ("avatar_3", "/static/avatars/avatar_3.png", "avatar 3"),
-        ("avatar_3", "/static/avatars/avatar_3.png", "avatar 4"),
+        ("avatar_3", "/static/avatars/avatar_4.png", "avatar 4"),
     ]
 
 
