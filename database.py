@@ -70,6 +70,7 @@ def get_schema_statements():
             id                         TEXT NOT NULL PRIMARY KEY,
             name                       TEXT NOT NULL,
             description                TEXT,
+            image_url                  TEXT,
             temp_min                   REAL,
             temp_max                   REAL,
             humidity_min               REAL,

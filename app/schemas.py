@@ -59,6 +59,7 @@ class GreenhouseOut(BaseModel):
 class PlantTypeCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    image_url: Optional[str] = None
     temp_min: Optional[float] = None
     temp_max: Optional[float] = None
     humidity_min: Optional[float] = None
@@ -71,6 +72,7 @@ class PlantTypeOut(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
+    image_url: Optional[str] = None
     temp_min: Optional[float] = None
     temp_max: Optional[float] = None
     humidity_min: Optional[float] = None

@@ -1,12 +1,14 @@
+import os
 import random
+import shutil
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import text
 
-from .config import JWT_ACCESS_TOKEN_EXPIRE_MINUTES, engine, logger
+from .config import JWT_ACCESS_TOKEN_EXPIRE_MINUTES, PLANT_TYPES_DIR, engine, logger
 from .dependencies import (
     create_access_token,
     get_current_user,
@@ -499,13 +501,51 @@ def list_plant_types(current_user: dict = Depends(get_current_user)):
         rows = conn.execute(
             text(
                 """
-            SELECT id, name, description, temp_min, temp_max,
+            SELECT id, name, description, image_url, temp_min, temp_max,
                    humidity_min, humidity_max, watering_interval_days, fertilizing_interval_days
             FROM plant_types ORDER BY name ASC
         """
             )
         ).mappings().all()
         return [PlantTypeOut(**r) for r in rows]
+
+
+@router.post("/plant-types/upload-image", status_code=200)
+async def upload_plant_image(
+    file: UploadFile = File(...),
+    admin: dict = Depends(require_admin),
+):
+    """Загрузка изображения для растения. Доступ: admin."""
+    # Проверяем расширение файла
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Недопустимый формат файла. Разрешены: {', '.join(allowed_extensions)}",
+        )
+    
+    # Генерируем уникальное имя файла
+    file_id = new_id()
+    filename = f"{file_id}{file_ext}"
+    file_path = os.path.join(PLANT_TYPES_DIR, filename)
+    
+    # Сохраняем файл
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении файла: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ошибка при сохранении файла",
+        )
+    
+    # Возвращаем URL для использования
+    image_url = f"/static/plant-types/{filename}"
+    logger.info("Загружено изображение растения: %s", filename)
+    return {"image_url": image_url, "filename": filename}
 
 
 @router.post("/plant-types", response_model=PlantTypeOut, status_code=201)
@@ -517,16 +557,17 @@ def create_plant_type(payload: PlantTypeCreate, admin: dict = Depends(require_ad
             text(
                 """
             INSERT INTO plant_types
-              (id, name, description, temp_min, temp_max,
+              (id, name, description, image_url, temp_min, temp_max,
                humidity_min, humidity_max, watering_interval_days, fertilizing_interval_days)
             VALUES
-              (:id, :name, :description, :tmin, :tmax, :hmin, :hmax, :wi, :fi)
+              (:id, :name, :description, :img_url, :tmin, :tmax, :hmin, :hmax, :wi, :fi)
         """
             ),
             {
                 "id": pt_id,
                 "name": payload.name,
                 "description": payload.description,
+                "img_url": payload.image_url,
                 "tmin": payload.temp_min,
                 "tmax": payload.temp_max,
                 "hmin": payload.humidity_min,
@@ -539,7 +580,7 @@ def create_plant_type(payload: PlantTypeCreate, admin: dict = Depends(require_ad
             conn.execute(
                 text(
                     """
-            SELECT id, name, description, temp_min, temp_max,
+            SELECT id, name, description, image_url, temp_min, temp_max,
                    humidity_min, humidity_max, watering_interval_days, fertilizing_interval_days
             FROM plant_types WHERE id=:id
         """

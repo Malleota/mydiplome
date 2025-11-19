@@ -40,9 +40,11 @@ engine = create_engine(DSN, connect_args={"check_same_thread": False}, echo=Fals
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 AVATARS_DIR = os.path.join(STATIC_DIR, "avatars")
+PLANT_TYPES_DIR = os.path.join(STATIC_DIR, "plant-types")
 
 # Создаём папки при старте, если их нет
 os.makedirs(AVATARS_DIR, exist_ok=True)
+os.makedirs(PLANT_TYPES_DIR, exist_ok=True)
 
 
 @event.listens_for(engine, "connect")
