@@ -41,10 +41,12 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 AVATARS_DIR = os.path.join(STATIC_DIR, "avatars")
 PLANT_TYPES_DIR = os.path.join(STATIC_DIR, "plant-types")
+GREENHOUSES_DIR = os.path.join(STATIC_DIR, "greenhouses")
 
 # Создаём папки при старте, если их нет
 os.makedirs(AVATARS_DIR, exist_ok=True)
 os.makedirs(PLANT_TYPES_DIR, exist_ok=True)
+os.makedirs(GREENHOUSES_DIR, exist_ok=True)
 
 
 @event.listens_for(engine, "connect")

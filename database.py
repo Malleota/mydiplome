@@ -13,6 +13,17 @@ def get_default_avatars():
         ("avatar_1", "/static/avatars/avatar_1.png", "avatar 1"),
         ("avatar_2", "/static/avatars/avatar_2.png", "avatar 2"),
         ("avatar_3", "/static/avatars/avatar_3.png", "avatar 3"),
+        ("avatar_3", "/static/avatars/avatar_3.png", "avatar 4"),
+    ]
+
+
+def get_default_greenhouse_images():
+    """Возвращает список базовых изображений для теплиц."""
+    # Используем локальные пути на сервере
+    return [
+        ("greenhouse_1", "/static/greenhouses/greenhouse_1.png", "Greenhouse 1"),
+        ("greenhouse_2", "/static/greenhouses/greenhouse_2.png", "Greenhouse 2"),
+        ("greenhouse_3", "/static/greenhouses/greenhouse_3.png", "Greenhouse 3"),
     ]
 
 
@@ -22,6 +33,14 @@ def get_schema_statements():
         # Сначала создаём таблицы без внешних ключей
         """
         CREATE TABLE IF NOT EXISTS avatars (
+            id            TEXT NOT NULL PRIMARY KEY,
+            image_url     TEXT NOT NULL,
+            name          TEXT,
+            created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS greenhouse_images (
             id            TEXT NOT NULL PRIMARY KEY,
             image_url     TEXT NOT NULL,
             name          TEXT,
@@ -54,6 +73,7 @@ def get_schema_statements():
             id               TEXT NOT NULL PRIMARY KEY,
             name             TEXT NOT NULL,
             description      TEXT,
+            image_url        TEXT,
             sensor_id        TEXT UNIQUE,
             target_temp_min  REAL,
             target_temp_max  REAL,
@@ -208,6 +228,18 @@ def ensure_schema(engine: Engine, db_path: str = None):
                     {"id": avatar_id, "url": image_url, "name": name}
                 )
             logger.info(f"Добавлено {len(avatars)} базовых аватарок")
+    
+    # Заполняем изображения теплиц, если таблица пустая
+    with engine.begin() as conn:
+        existing_count = conn.execute(text("SELECT COUNT(*) FROM greenhouse_images")).scalar()
+        if existing_count == 0:
+            images = get_default_greenhouse_images()
+            for image_id, image_url, name in images:
+                conn.execute(
+                    text("INSERT INTO greenhouse_images (id, image_url, name) VALUES (:id, :url, :name)"),
+                    {"id": image_id, "url": image_url, "name": name}
+                )
+            logger.info(f"Добавлено {len(images)} базовых изображений теплиц")
     
     logger.info("Схема базы данных успешно инициализирована")
 

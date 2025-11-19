@@ -38,6 +38,7 @@ class TokenData(BaseModel):
 class GreenhouseCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    image_url: Optional[str] = None
     target_temp_min: Optional[float] = None
     target_temp_max: Optional[float] = None
     target_hum_min: Optional[float] = None
@@ -48,6 +49,7 @@ class GreenhouseOut(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
+    image_url: Optional[str] = None
     sensor_id: Optional[str] = None
     target_temp_min: Optional[float] = None
     target_temp_max: Optional[float] = None
@@ -160,6 +162,12 @@ class AvatarUpdate(BaseModel):
 
 
 class AvatarOut(BaseModel):
+    id: str
+    image_url: str
+    name: Optional[str] = None
+
+
+class GreenhouseImageOut(BaseModel):
     id: str
     image_url: str
     name: Optional[str] = None

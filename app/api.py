@@ -26,6 +26,7 @@ from .schemas import (
     BindSensorIn,
     BindWorkerIn,
     GreenhouseCreate,
+    GreenhouseImageOut,
     GreenhouseOut,
     PlantInstanceCreate,
     PlantInstanceOut,
@@ -282,13 +283,23 @@ def update_user_role(
 
 
 # --- Greenhouses ---
+@router.get("/greenhouse-images", response_model=List[GreenhouseImageOut])
+def list_greenhouse_images():
+    """Получение списка доступных изображений для теплиц."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT id, image_url, name FROM greenhouse_images ORDER BY name ASC")
+        ).mappings().all()
+        return [GreenhouseImageOut(**r) for r in rows]
+
+
 @router.get("/greenhouses", response_model=List[GreenhouseOut])
 def list_greenhouses(current_user: dict = Depends(get_current_user)):
     """Получение списка теплиц. Админ видит все, рабочий - только привязанные."""
     with engine.connect() as conn:
         if current_user["role"] == "admin":
             sql = """
-                SELECT id, name, description, sensor_id,
+                SELECT id, name, description, image_url, sensor_id,
                        target_temp_min, target_temp_max,
                        target_hum_min, target_hum_max, created_at
                 FROM greenhouses
@@ -297,7 +308,7 @@ def list_greenhouses(current_user: dict = Depends(get_current_user)):
             rows = conn.execute(text(sql)).mappings().all()
         else:
             sql = """
-                SELECT g.id, g.name, g.description, g.sensor_id,
+                SELECT g.id, g.name, g.description, g.image_url, g.sensor_id,
                        g.target_temp_min, g.target_temp_max,
                        g.target_hum_min, g.target_hum_max, g.created_at
                 FROM greenhouses g
@@ -314,22 +325,36 @@ def list_greenhouses(current_user: dict = Depends(get_current_user)):
 def create_greenhouse(payload: GreenhouseCreate, admin: dict = Depends(require_admin)):
     """Создание теплицы. Доступ: admin."""
     gh_id = new_id()
+    
     sql = """
     INSERT INTO greenhouses
-      (id, name, description,
+      (id, name, description, image_url,
        target_temp_min, target_temp_max,
        target_hum_min, target_hum_max)
     VALUES
-      (:id, :name, :description,
+      (:id, :name, :description, :img_url,
        :tmin, :tmax, :hmin, :hmax)
     """
     with engine.begin() as conn:
+        # Проверяем, что выбранное изображение существует (если указано)
+        if payload.image_url:
+            image_exists = conn.execute(
+                text("SELECT 1 FROM greenhouse_images WHERE image_url=:url"),
+                {"url": payload.image_url},
+            ).scalar()
+            if not image_exists:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Выбранное изображение не найдено в списке доступных",
+                )
+        
         conn.execute(
             text(sql),
             {
                 "id": gh_id,
                 "name": payload.name,
                 "description": payload.description,
+                "img_url": payload.image_url,
                 "tmin": payload.target_temp_min,
                 "tmax": payload.target_temp_max,
                 "hmin": payload.target_hum_min,
@@ -340,7 +365,7 @@ def create_greenhouse(payload: GreenhouseCreate, admin: dict = Depends(require_a
             conn.execute(
                 text(
                     """
-            SELECT id, name, description, sensor_id,
+            SELECT id, name, description, image_url, sensor_id,
                    target_temp_min, target_temp_max,
                    target_hum_min, target_hum_max, created_at
             FROM greenhouses WHERE id=:id
@@ -375,7 +400,7 @@ def get_greenhouse(gh_id: str, current_user: dict = Depends(get_current_user)):
             conn.execute(
                 text(
                     """
-            SELECT id, name, description, sensor_id,
+            SELECT id, name, description, image_url, sensor_id,
                    target_temp_min, target_temp_max,
                    target_hum_min, target_hum_max, created_at
             FROM greenhouses WHERE id=:id
