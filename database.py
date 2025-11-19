@@ -165,6 +165,22 @@ def get_schema_statements():
                 ON DELETE SET NULL
         );
         """,
+        """
+        CREATE TABLE IF NOT EXISTS sensor_readings (
+            id            TEXT NOT NULL PRIMARY KEY,
+            sensor_id     TEXT NOT NULL,
+            greenhouse_id TEXT,
+            temperature   REAL NOT NULL,
+            humidity      REAL NOT NULL,
+            created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fk_sr_sensor
+                FOREIGN KEY (sensor_id) REFERENCES sensors(id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_sr_greenhouse
+                FOREIGN KEY (greenhouse_id) REFERENCES greenhouses(id)
+                ON DELETE SET NULL
+        );
+        """,
         # Индексы для улучшения производительности
         """
         CREATE INDEX IF NOT EXISTS idx_watering_events_created_at
@@ -189,6 +205,18 @@ def get_schema_statements():
         """
         CREATE INDEX IF NOT EXISTS idx_plant_instances_greenhouse_id
             ON plant_instances(greenhouse_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_sensor_readings_sensor_id
+            ON sensor_readings(sensor_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_sensor_readings_greenhouse_id
+            ON sensor_readings(greenhouse_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_sensor_readings_created_at
+            ON sensor_readings(created_at DESC);
         """,
     ]
 

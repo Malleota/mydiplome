@@ -41,6 +41,7 @@ from .schemas import (
     PlantTypeOut,
     ReportOut,
     SensorDataIn,
+    SensorReadingOut,
     Token,
     UserOut,
     UserRegister,
@@ -1365,6 +1366,7 @@ def create_watering_event(payload: WaterEventCreate, current_user: dict = Depend
 def receive_sensor_data(payload: SensorDataIn):
     """
     Приём данных от BLE-датчика (температура, влажность).
+    Сохраняет данные в историю и обновляет последние значения.
     Проверяет значения относительно норм, сохраняет предупреждения в alerts и отправляет push-уведомление.
     Доступ: сервисный вызов (без роли, используется системой).
     """
@@ -1390,6 +1392,7 @@ def receive_sensor_data(payload: SensorDataIn):
         if not sensor:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sensor not found")
 
+        # Обновляем последние значения датчика
         conn.execute(
             text(
                 """
@@ -1402,6 +1405,24 @@ def receive_sensor_data(payload: SensorDataIn):
             ),
             {
                 "sensor_id": sensor["id"],
+                "temp": payload.temperature,
+                "hum": payload.humidity,
+            },
+        )
+
+        # Сохраняем данные в историю
+        reading_id = new_id()
+        conn.execute(
+            text(
+                """
+            INSERT INTO sensor_readings (id, sensor_id, greenhouse_id, temperature, humidity)
+            VALUES (:id, :sensor_id, :greenhouse_id, :temp, :hum)
+        """
+            ),
+            {
+                "id": reading_id,
+                "sensor_id": sensor["id"],
+                "greenhouse_id": sensor["greenhouse_id"],
                 "temp": payload.temperature,
                 "hum": payload.humidity,
             },
@@ -1523,6 +1544,135 @@ def receive_sensor_data(payload: SensorDataIn):
         payload.temperature,
         payload.humidity,
     )
+
+
+@router.get("/greenhouses/{gh_id}/sensor-data/current", response_model=SensorReadingOut)
+def get_current_sensor_data(gh_id: str, current_user: dict = Depends(get_current_user)):
+    """Получение текущих данных датчика для теплицы."""
+    with engine.connect() as conn:
+        # Проверка доступа для рабочих
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": gh_id},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+        
+        # Проверка существования теплицы
+        gh = conn.execute(
+            text("SELECT id, sensor_id FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).mappings().first()
+        
+        if not gh:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found")
+        
+        if not gh["sensor_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="No sensor attached to this greenhouse"
+            )
+        
+        # Получаем последние данные датчика из истории
+        reading = conn.execute(
+            text(
+                """
+            SELECT id, sensor_id, greenhouse_id, temperature, humidity, created_at
+            FROM sensor_readings
+            WHERE greenhouse_id = :gh_id
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+            ),
+            {"gh_id": gh_id},
+        ).mappings().first()
+        
+        if not reading:
+            # Если нет истории, берем из таблицы sensors
+            sensor = conn.execute(
+                text(
+                    """
+                SELECT id, last_temperature as temperature, last_humidity as humidity, last_update as created_at
+                FROM sensors
+                WHERE id = :sensor_id
+            """
+                ),
+                {"sensor_id": gh["sensor_id"]},
+            ).mappings().first()
+            
+            if not sensor or sensor["temperature"] is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="No sensor data available"
+                )
+            
+            return SensorReadingOut(
+                id="",
+                sensor_id=sensor["id"],
+                greenhouse_id=gh_id,
+                temperature=sensor["temperature"],
+                humidity=sensor["humidity"],
+                created_at=sensor["created_at"] or datetime.now(),
+            )
+        
+        return SensorReadingOut(**reading)
+
+
+@router.get("/greenhouses/{gh_id}/sensor-data", response_model=List[SensorReadingOut])
+def get_sensor_data_history(
+    gh_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    """Получение истории данных датчика для теплицы."""
+    with engine.connect() as conn:
+        # Проверка доступа для рабочих
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": gh_id},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+        
+        # Проверка существования теплицы
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        
+        if not gh_exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found")
+        
+        # Получаем историю данных
+        readings = conn.execute(
+            text(
+                """
+            SELECT id, sensor_id, greenhouse_id, temperature, humidity, created_at
+            FROM sensor_readings
+            WHERE greenhouse_id = :gh_id
+            ORDER BY created_at DESC
+            LIMIT :limit OFFSET :offset
+        """
+            ),
+            {"gh_id": gh_id, "limit": limit, "offset": offset},
+        ).mappings().all()
+        
+        return [SensorReadingOut(**r) for r in readings]
 
 
 # --- Alerts ---

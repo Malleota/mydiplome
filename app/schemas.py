@@ -193,3 +193,13 @@ class NextWateringOut(BaseModel):
     days_until: Optional[int] = None
     is_overdue: bool = False
 
+
+class SensorReadingOut(BaseModel):
+    """Данные от датчика."""
+    id: str
+    sensor_id: str
+    greenhouse_id: Optional[str] = None
+    temperature: float
+    humidity: float
+    created_at: datetime
+
