@@ -34,6 +34,7 @@ from .schemas import (
     GreenhouseCreate,
     GreenhouseImageOut,
     GreenhouseOut,
+    NextWateringOut,
     PlantInstanceCreate,
     PlantInstanceOut,
     PlantTypeCreate,
@@ -369,18 +370,9 @@ def list_greenhouses(current_user: dict = Depends(get_current_user)):
 
 @router.post("/greenhouses", response_model=GreenhouseOut, status_code=201)
 def create_greenhouse(payload: GreenhouseCreate, admin: dict = Depends(require_admin)):
-    """Создание теплицы. Доступ: admin."""
+    """Создание теплицы с привязкой растений и рабочих. Доступ: admin."""
     gh_id = new_id()
     
-    sql = """
-    INSERT INTO greenhouses
-      (id, name, description, image_url,
-       target_temp_min, target_temp_max,
-       target_hum_min, target_hum_max)
-    VALUES
-      (:id, :name, :description, :img_url,
-       :tmin, :tmax, :hmin, :hmax)
-    """
     with engine.begin() as conn:
         # Проверяем, что выбранное изображение существует (если указано)
         if payload.image_url:
@@ -394,6 +386,61 @@ def create_greenhouse(payload: GreenhouseCreate, admin: dict = Depends(require_a
                     detail="Выбранное изображение не найдено в списке доступных",
                 )
         
+        # Валидация: если растения не выбраны, температуры не должны быть указаны
+        if not payload.plants or len(payload.plants) == 0:
+            if payload.target_temp_min is not None or payload.target_temp_max is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Если растения не выбраны, температуры не должны быть указаны",
+                )
+            target_temp_min = None
+            target_temp_max = None
+            target_hum_min = None
+            target_hum_max = None
+        else:
+            # Если растения выбраны, вычисляем средние значения температур
+            plant_type_ids = [p.plant_type_id for p in payload.plants]
+            placeholders = ",".join([f":id{i}" for i in range(len(plant_type_ids))])
+            params = {f"id{i}": pid for i, pid in enumerate(plant_type_ids)}
+            
+            plants_data = conn.execute(
+                text(
+                    f"""
+                    SELECT temp_min, temp_max, humidity_min, humidity_max
+                    FROM plant_types
+                    WHERE id IN ({placeholders})
+                    """
+                ),
+                params,
+            ).mappings().all()
+            
+            if len(plants_data) != len(plant_type_ids):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Один или несколько типов растений не найдены",
+                )
+            
+            # Вычисляем средние значения
+            temp_mins = [p["temp_min"] for p in plants_data if p["temp_min"] is not None]
+            temp_maxs = [p["temp_max"] for p in plants_data if p["temp_max"] is not None]
+            hum_mins = [p["humidity_min"] for p in plants_data if p["humidity_min"] is not None]
+            hum_maxs = [p["humidity_max"] for p in plants_data if p["humidity_max"] is not None]
+            
+            target_temp_min = sum(temp_mins) / len(temp_mins) if temp_mins else None
+            target_temp_max = sum(temp_maxs) / len(temp_maxs) if temp_maxs else None
+            target_hum_min = sum(hum_mins) / len(hum_mins) if hum_mins else None
+            target_hum_max = sum(hum_maxs) / len(hum_maxs) if hum_maxs else None
+        
+        # Создаем теплицу
+        sql = """
+        INSERT INTO greenhouses
+          (id, name, description, image_url,
+           target_temp_min, target_temp_max,
+           target_hum_min, target_hum_max)
+        VALUES
+          (:id, :name, :description, :img_url,
+           :tmin, :tmax, :hmin, :hmax)
+        """
         conn.execute(
             text(sql),
             {
@@ -401,12 +448,109 @@ def create_greenhouse(payload: GreenhouseCreate, admin: dict = Depends(require_a
                 "name": payload.name,
                 "description": payload.description,
                 "img_url": payload.image_url,
-                "tmin": payload.target_temp_min,
-                "tmax": payload.target_temp_max,
-                "hmin": payload.target_hum_min,
-                "hmax": payload.target_hum_max,
+                "tmin": target_temp_min,
+                "tmax": target_temp_max,
+                "hmin": target_hum_min,
+                "hmax": target_hum_max,
             },
         )
+        
+        # Привязываем растения, если они указаны
+        if payload.plants:
+            for plant in payload.plants:
+                # Проверяем, что тип растения существует
+                pt_exists = conn.execute(
+                    text("SELECT 1 FROM plant_types WHERE id=:id"),
+                    {"id": plant.plant_type_id},
+                ).scalar()
+                if not pt_exists:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Тип растения {plant.plant_type_id} не найден",
+                    )
+                
+                pi_id = new_id()
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO plant_instances (id, greenhouse_id, plant_type_id, quantity, note)
+                        VALUES (:id, :gh, :pt, :q, :note)
+                        """
+                    ),
+                    {
+                        "id": pi_id,
+                        "gh": gh_id,
+                        "pt": plant.plant_type_id,
+                        "q": plant.quantity,
+                        "note": plant.note,
+                    },
+                )
+        
+        # Привязываем рабочих, если они указаны
+        if payload.worker_ids:
+            for worker_id in payload.worker_ids:
+                # Проверяем, что пользователь существует и является рабочим
+                user = conn.execute(
+                    text("SELECT role FROM users WHERE id=:id"),
+                    {"id": worker_id},
+                ).mappings().first()
+                if not user:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Пользователь {worker_id} не найден",
+                    )
+                if user["role"] != "worker":
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Пользователь {worker_id} должен быть рабочим",
+                    )
+                
+                # Привязываем рабочего (игнорируем ошибку, если уже привязан)
+                try:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO user_greenhouses (user_id, greenhouse_id)
+                            VALUES (:user_id, :gh_id)
+                            """
+                        ),
+                        {"user_id": worker_id, "gh_id": gh_id},
+                    )
+                except Exception:
+                    pass  # Уже привязан
+        
+        # Привязываем датчик, если он указан
+        if payload.sensor_ble_identifier:
+            sensor_id = conn.execute(
+                text("SELECT id FROM sensors WHERE ble_identifier=:b"),
+                {"b": payload.sensor_ble_identifier},
+            ).scalar()
+            if sensor_id is None:
+                # Создаем новый датчик, если его нет
+                sensor_id = new_id()
+                conn.execute(
+                    text("INSERT INTO sensors (id, ble_identifier) VALUES (:id, :b)"),
+                    {"id": sensor_id, "b": payload.sensor_ble_identifier},
+                )
+            else:
+                # Проверяем, не привязан ли датчик к другой теплице
+                existing_greenhouse = conn.execute(
+                    text("SELECT id, name FROM greenhouses WHERE sensor_id=:sid"),
+                    {"sid": sensor_id},
+                ).mappings().first()
+                if existing_greenhouse:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Датчик уже привязан к теплице '{existing_greenhouse['name']}' (ID: {existing_greenhouse['id']})",
+                    )
+            
+            # Привязываем датчик к новой теплице
+            conn.execute(
+                text("UPDATE greenhouses SET sensor_id=:sid WHERE id=:gh"),
+                {"sid": sensor_id, "gh": gh_id},
+            )
+        
+        # Получаем созданную теплицу
         row = (
             conn.execute(
                 text(
@@ -427,6 +571,11 @@ def create_greenhouse(payload: GreenhouseCreate, admin: dict = Depends(require_a
         gh_data = dict(row)
         gh_data["image_url"] = get_full_static_url(gh_data["image_url"])
     
+    logger.info("Теплица %s создана с %d растениями, %d рабочими%s", 
+                gh_id, 
+                len(payload.plants) if payload.plants else 0,
+                len(payload.worker_ids) if payload.worker_ids else 0,
+                f" и датчиком {payload.sensor_ble_identifier}" if payload.sensor_ble_identifier else "")
     return GreenhouseOut(**gh_data)
 
 
@@ -487,27 +636,41 @@ def delete_greenhouse(gh_id: str, admin: dict = Depends(require_admin)):
 def bind_sensor(gh_id: str, payload: BindSensorIn, admin: dict = Depends(require_admin)):
     """Привязка датчика BLE к теплице. Доступ: admin."""
     with engine.begin() as conn:
+        # Проверяем существование теплицы
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        if not gh_exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found")
+        
         sensor_id = conn.execute(
             text("SELECT id FROM sensors WHERE ble_identifier=:b"),
             {"b": payload.ble_identifier},
         ).scalar()
         if sensor_id is None:
+            # Создаем новый датчик, если его нет
             sensor_id = new_id()
             conn.execute(
                 text("INSERT INTO sensors (id, ble_identifier) VALUES (:id, :b)"),
                 {"id": sensor_id, "b": payload.ble_identifier},
             )
-
+        else:
+            # Проверяем, не привязан ли датчик к другой теплице
+            existing_greenhouse = conn.execute(
+                text("SELECT id, name FROM greenhouses WHERE sensor_id=:sid AND id != :gh_id"),
+                {"sid": sensor_id, "gh_id": gh_id},
+            ).mappings().first()
+            if existing_greenhouse:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Датчик уже привязан к теплице '{existing_greenhouse['name']}' (ID: {existing_greenhouse['id']})",
+                )
+        
+        # Привязываем датчик к теплице
         conn.execute(
-            text("UPDATE greenhouses SET sensor_id=NULL WHERE sensor_id=:sid"),
-            {"sid": sensor_id},
-        )
-        updated = conn.execute(
             text("UPDATE greenhouses SET sensor_id=:sid WHERE id=:gh"),
             {"sid": sensor_id, "gh": gh_id},
-        ).rowcount
-        if updated == 0:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found")
+        )
     logger.info("Датчик %s привязан к теплице %s", payload.ble_identifier, gh_id)
 
 
@@ -768,6 +931,261 @@ def delete_plant_instance(gh_id: str, pi_id: str, admin: dict = Depends(require_
 
         conn.execute(text("DELETE FROM plant_instances WHERE id=:id"), {"id": pi_id})
     logger.info("Растение %s удалено из теплицы %s", pi_id, gh_id)
+
+
+@router.get("/greenhouses/{gh_id}/plants", response_model=List[PlantInstanceOut])
+def list_plant_instances(gh_id: str, current_user: dict = Depends(get_current_user)):
+    """Получение списка растений в теплице."""
+    with engine.connect() as conn:
+        # Проверка доступа для рабочих
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": gh_id},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+        
+        # Проверка существования теплицы
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        if not gh_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found"
+            )
+        
+        rows = conn.execute(
+            text(
+                """
+            SELECT id, greenhouse_id, plant_type_id, quantity, note
+            FROM plant_instances
+            WHERE greenhouse_id = :gh_id
+            ORDER BY id ASC
+        """
+            ),
+            {"gh_id": gh_id},
+        ).mappings().all()
+        
+        return [PlantInstanceOut(**r) for r in rows]
+
+
+@router.get("/greenhouses/{gh_id}/next-watering", response_model=NextWateringOut)
+def get_next_watering_greenhouse(gh_id: str, current_user: dict = Depends(get_current_user)):
+    """Получение ближайшего полива по всей теплице (среди всех поливов теплицы)."""
+    with engine.connect() as conn:
+        # Проверка доступа для рабочих
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": gh_id},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+        
+        # Проверка существования теплицы
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        if not gh_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found"
+            )
+        
+        # Находим ближайший следующий полив по всей теплице
+        # Сначала находим последний полив по всей теплице (где plant_instance_id IS NULL)
+        last_greenhouse_watering = conn.execute(
+            text(
+                """
+            SELECT 
+                we.id,
+                we.greenhouse_id,
+                we.plant_instance_id,
+                we.created_at
+            FROM watering_events we
+            WHERE we.greenhouse_id = :gh_id
+                AND we.type = 'watering'
+                AND we.plant_instance_id IS NULL
+            ORDER BY we.created_at DESC
+            LIMIT 1
+        """
+            ),
+            {"gh_id": gh_id},
+        ).mappings().first()
+        
+        # Находим все поливы по растениям с вычислением следующего полива
+        plant_waterings = conn.execute(
+            text(
+                """
+            SELECT 
+                we.id,
+                we.greenhouse_id,
+                we.plant_instance_id,
+                we.created_at,
+                pt.watering_interval_days,
+                datetime(we.created_at, '+' || pt.watering_interval_days || ' days') as next_watering_date
+            FROM watering_events we
+            INNER JOIN plant_instances pi ON we.plant_instance_id = pi.id
+            INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
+            WHERE we.greenhouse_id = :gh_id
+                AND we.type = 'watering'
+                AND pt.watering_interval_days IS NOT NULL
+            ORDER BY we.created_at DESC
+        """
+            ),
+            {"gh_id": gh_id},
+        ).mappings().all()
+        
+        now = datetime.now()
+        closest_watering = None
+        closest_days = None
+        
+        # Обрабатываем полив по всей теплице (без интервала, просто последний)
+        if last_greenhouse_watering:
+            closest_watering = last_greenhouse_watering
+            closest_days = None  # Нет интервала для полива теплицы
+        
+        # Обрабатываем поливы по растениям, находим ближайший следующий
+        for pw in plant_waterings:
+            next_date = pw["next_watering_date"]
+            if next_date:
+                if isinstance(next_date, str):
+                    next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
+                if isinstance(next_date, datetime):
+                    next_date = next_date.replace(tzinfo=None)
+                    days_until = (next_date - now).days
+                    
+                    # Если это первый найденный или ближе чем предыдущий
+                    if closest_days is None or days_until < closest_days:
+                        closest_watering = pw
+                        closest_days = days_until
+        
+        if not closest_watering:
+            return NextWateringOut(
+                greenhouse_id=gh_id,
+                plant_instance_id=None,
+                plant_name=None,
+                next_watering_date=None,
+                days_until=None,
+                is_overdue=False,
+            )
+        
+        is_overdue = closest_days is not None and closest_days < 0
+        
+        return NextWateringOut(
+            greenhouse_id=gh_id,
+            plant_instance_id=closest_watering["plant_instance_id"],
+            plant_name=None,
+            next_watering_date=closest_watering["created_at"],
+            days_until=closest_days,
+            is_overdue=is_overdue,
+        )
+
+
+@router.get("/greenhouses/{gh_id}/plants/next-watering", response_model=List[NextWateringOut])
+def get_next_watering_plants(gh_id: str, current_user: dict = Depends(get_current_user)):
+    """Получение ближайшего полива по каждому растению в теплице."""
+    with engine.connect() as conn:
+        # Проверка доступа для рабочих
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": gh_id},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+        
+        # Проверка существования теплицы
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        if not gh_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found"
+            )
+        
+        # Получаем все растения в теплице с информацией о последнем поливе
+        rows = conn.execute(
+            text(
+                """
+            SELECT 
+                pi.id as plant_instance_id,
+                pi.greenhouse_id,
+                pt.name as plant_name,
+                pt.watering_interval_days,
+                MAX(we.created_at) as last_watering,
+                datetime(MAX(we.created_at), '+' || pt.watering_interval_days || ' days') as next_watering_date
+            FROM plant_instances pi
+            INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
+            LEFT JOIN watering_events we ON we.plant_instance_id = pi.id 
+                AND we.type = 'watering'
+            WHERE pi.greenhouse_id = :gh_id
+                AND pt.watering_interval_days IS NOT NULL
+            GROUP BY pi.id, pi.greenhouse_id, pt.name, pt.watering_interval_days
+            ORDER BY next_watering_date ASC NULLS LAST
+        """
+            ),
+            {"gh_id": gh_id},
+        ).mappings().all()
+        
+        result = []
+        now = datetime.now()
+        
+        for row in rows:
+            next_date = row["next_watering_date"]
+            days_until = None
+            is_overdue = False
+            
+            # Если полива не было, следующий полив - через интервал от текущей даты
+            if not row["last_watering"]:
+                if row["watering_interval_days"]:
+                    days_until = row["watering_interval_days"]
+                    is_overdue = False
+            elif next_date:
+                # Вычисляем дни до следующего полива
+                if isinstance(next_date, str):
+                    next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
+                if isinstance(next_date, datetime):
+                    next_date = next_date.replace(tzinfo=None)
+                    days_until = (next_date - now).days
+                    is_overdue = days_until < 0
+            
+            result.append(
+                NextWateringOut(
+                    greenhouse_id=gh_id,
+                    plant_instance_id=row["plant_instance_id"],
+                    plant_name=row["plant_name"],
+                    next_watering_date=row["last_watering"],
+                    days_until=days_until,
+                    is_overdue=is_overdue,
+                )
+            )
+        
+        return result
 
 
 # --- Watering events ---

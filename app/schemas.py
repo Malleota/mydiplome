@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -36,6 +36,13 @@ class TokenData(BaseModel):
     user_id: Optional[str] = None
 
 
+class GreenhousePlantCreate(BaseModel):
+    """Растение для добавления в теплицу при создании."""
+    plant_type_id: str
+    quantity: int = Field(1, ge=1)
+    note: Optional[str] = None
+
+
 class GreenhouseCreate(BaseModel):
     name: str
     description: Optional[str] = None
@@ -44,6 +51,9 @@ class GreenhouseCreate(BaseModel):
     target_temp_max: Optional[float] = None
     target_hum_min: Optional[float] = None
     target_hum_max: Optional[float] = None
+    plants: Optional[List[GreenhousePlantCreate]] = None
+    worker_ids: Optional[List[str]] = None
+    sensor_ble_identifier: Optional[str] = None
 
 
 class GreenhouseOut(BaseModel):
@@ -172,4 +182,14 @@ class GreenhouseImageOut(BaseModel):
     id: str
     image_url: str
     name: Optional[str] = None
+
+
+class NextWateringOut(BaseModel):
+    """Информация о ближайшем поливе."""
+    greenhouse_id: str
+    plant_instance_id: Optional[str] = None
+    plant_name: Optional[str] = None
+    next_watering_date: Optional[datetime] = None
+    days_until: Optional[int] = None
+    is_overdue: bool = False
 
