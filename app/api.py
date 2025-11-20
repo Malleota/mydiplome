@@ -1432,92 +1432,152 @@ def receive_sensor_data(payload: SensorDataIn):
             alerts_created = []
 
             if sensor["target_temp_min"] is not None and payload.temperature < sensor["target_temp_min"]:
-                alert_id = new_id()
-                message = (
-                    f"Температура ниже нормы: {payload.temperature}°C (минимум: {sensor['target_temp_min']}°C)"
-                )
-                severity = "critical" if payload.temperature < sensor["target_temp_min"] - 5 else "warning"
-                conn.execute(
+                # Проверяем, есть ли уже непрочитанный alert такого же типа
+                existing_alert = conn.execute(
                     text(
                         """
-                    INSERT INTO alerts (id, greenhouse_id, type, message, severity)
-                    VALUES (:id, :gh_id, 'temperature', :msg, :sev)
+                    SELECT 1 FROM alerts
+                    WHERE greenhouse_id = :gh_id
+                    AND type = 'temperature'
+                    AND is_read = 0
+                    LIMIT 1
                 """
                     ),
-                    {
-                        "id": alert_id,
-                        "gh_id": sensor["greenhouse_id"],
-                        "msg": message,
-                        "sev": severity,
-                    },
-                )
-                alerts_created.append((sensor["greenhouse_id"], message))
+                    {"gh_id": sensor["greenhouse_id"]},
+                ).scalar()
+                
+                if not existing_alert:
+                    alert_id = new_id()
+                    message = (
+                        f"Температура ниже нормы: {payload.temperature}°C (минимум: {sensor['target_temp_min']}°C)"
+                    )
+                    severity = "critical" if payload.temperature < sensor["target_temp_min"] - 5 else "warning"
+                    conn.execute(
+                        text(
+                            """
+                        INSERT INTO alerts (id, greenhouse_id, type, message, severity)
+                        VALUES (:id, :gh_id, 'temperature', :msg, :sev)
+                    """
+                        ),
+                        {
+                            "id": alert_id,
+                            "gh_id": sensor["greenhouse_id"],
+                            "msg": message,
+                            "sev": severity,
+                        },
+                    )
+                    alerts_created.append((sensor["greenhouse_id"], message))
 
             elif sensor["target_temp_max"] is not None and payload.temperature > sensor["target_temp_max"]:
-                alert_id = new_id()
-                message = (
-                    f"Температура выше нормы: {payload.temperature}°C (максимум: {sensor['target_temp_max']}°C)"
-                )
-                severity = "critical" if payload.temperature > sensor["target_temp_max"] + 5 else "warning"
-                conn.execute(
+                # Проверяем, есть ли уже непрочитанный alert такого же типа
+                existing_alert = conn.execute(
                     text(
                         """
-                    INSERT INTO alerts (id, greenhouse_id, type, message, severity)
-                    VALUES (:id, :gh_id, 'temperature', :msg, :sev)
+                    SELECT 1 FROM alerts
+                    WHERE greenhouse_id = :gh_id
+                    AND type = 'temperature'
+                    AND is_read = 0
+                    LIMIT 1
                 """
                     ),
-                    {
-                        "id": alert_id,
-                        "gh_id": sensor["greenhouse_id"],
-                        "msg": message,
-                        "sev": severity,
-                    },
-                )
-                alerts_created.append((sensor["greenhouse_id"], message))
+                    {"gh_id": sensor["greenhouse_id"]},
+                ).scalar()
+                
+                if not existing_alert:
+                    alert_id = new_id()
+                    message = (
+                        f"Температура выше нормы: {payload.temperature}°C (максимум: {sensor['target_temp_max']}°C)"
+                    )
+                    severity = "critical" if payload.temperature > sensor["target_temp_max"] + 5 else "warning"
+                    conn.execute(
+                        text(
+                            """
+                        INSERT INTO alerts (id, greenhouse_id, type, message, severity)
+                        VALUES (:id, :gh_id, 'temperature', :msg, :sev)
+                    """
+                        ),
+                        {
+                            "id": alert_id,
+                            "gh_id": sensor["greenhouse_id"],
+                            "msg": message,
+                            "sev": severity,
+                        },
+                    )
+                    alerts_created.append((sensor["greenhouse_id"], message))
 
             if sensor["target_hum_min"] is not None and payload.humidity < sensor["target_hum_min"]:
-                alert_id = new_id()
-                message = (
-                    f"Влажность ниже нормы: {payload.humidity}% (минимум: {sensor['target_hum_min']}%)"
-                )
-                severity = "critical" if payload.humidity < sensor["target_hum_min"] - 10 else "warning"
-                conn.execute(
+                # Проверяем, есть ли уже непрочитанный alert такого же типа
+                existing_alert = conn.execute(
                     text(
                         """
-                    INSERT INTO alerts (id, greenhouse_id, type, message, severity)
-                    VALUES (:id, :gh_id, 'humidity', :msg, :sev)
+                    SELECT 1 FROM alerts
+                    WHERE greenhouse_id = :gh_id
+                    AND type = 'humidity'
+                    AND is_read = 0
+                    LIMIT 1
                 """
                     ),
-                    {
-                        "id": alert_id,
-                        "gh_id": sensor["greenhouse_id"],
-                        "msg": message,
-                        "sev": severity,
-                    },
-                )
-                alerts_created.append((sensor["greenhouse_id"], message))
+                    {"gh_id": sensor["greenhouse_id"]},
+                ).scalar()
+                
+                if not existing_alert:
+                    alert_id = new_id()
+                    message = (
+                        f"Влажность ниже нормы: {payload.humidity}% (минимум: {sensor['target_hum_min']}%)"
+                    )
+                    severity = "critical" if payload.humidity < sensor["target_hum_min"] - 10 else "warning"
+                    conn.execute(
+                        text(
+                            """
+                        INSERT INTO alerts (id, greenhouse_id, type, message, severity)
+                        VALUES (:id, :gh_id, 'humidity', :msg, :sev)
+                    """
+                        ),
+                        {
+                            "id": alert_id,
+                            "gh_id": sensor["greenhouse_id"],
+                            "msg": message,
+                            "sev": severity,
+                        },
+                    )
+                    alerts_created.append((sensor["greenhouse_id"], message))
 
             elif sensor["target_hum_max"] is not None and payload.humidity > sensor["target_hum_max"]:
-                alert_id = new_id()
-                message = (
-                    f"Влажность выше нормы: {payload.humidity}% (максимум: {sensor['target_hum_max']}%)"
-                )
-                severity = "critical" if payload.humidity > sensor["target_hum_max"] + 10 else "warning"
-                conn.execute(
+                # Проверяем, есть ли уже непрочитанный alert такого же типа
+                existing_alert = conn.execute(
                     text(
                         """
-                    INSERT INTO alerts (id, greenhouse_id, type, message, severity)
-                    VALUES (:id, :gh_id, 'humidity', :msg, :sev)
+                    SELECT 1 FROM alerts
+                    WHERE greenhouse_id = :gh_id
+                    AND type = 'humidity'
+                    AND is_read = 0
+                    LIMIT 1
                 """
                     ),
-                    {
-                        "id": alert_id,
-                        "gh_id": sensor["greenhouse_id"],
-                        "msg": message,
-                        "sev": severity,
-                    },
-                )
-                alerts_created.append((sensor["greenhouse_id"], message))
+                    {"gh_id": sensor["greenhouse_id"]},
+                ).scalar()
+                
+                if not existing_alert:
+                    alert_id = new_id()
+                    message = (
+                        f"Влажность выше нормы: {payload.humidity}% (максимум: {sensor['target_hum_max']}%)"
+                    )
+                    severity = "critical" if payload.humidity > sensor["target_hum_max"] + 10 else "warning"
+                    conn.execute(
+                        text(
+                            """
+                        INSERT INTO alerts (id, greenhouse_id, type, message, severity)
+                        VALUES (:id, :gh_id, 'humidity', :msg, :sev)
+                    """
+                        ),
+                        {
+                            "id": alert_id,
+                            "gh_id": sensor["greenhouse_id"],
+                            "msg": message,
+                            "sev": severity,
+                        },
+                    )
+                    alerts_created.append((sensor["greenhouse_id"], message))
 
             if alerts_created:
                 workers = conn.execute(
@@ -1715,6 +1775,130 @@ def list_alerts(
     with engine.connect() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
         return [AlertOut(**{**r, "is_read": bool(r["is_read"])}) for r in rows]
+
+
+@router.patch("/alerts/{alert_id}/read", status_code=204)
+def mark_alert_as_read(alert_id: str, current_user: dict = Depends(get_current_user)):
+    """Отметить alert как прочитанный."""
+    with engine.begin() as conn:
+        # Проверяем существование alert и доступ
+        alert = conn.execute(
+            text(
+                """
+            SELECT a.id, a.greenhouse_id
+            FROM alerts a
+            WHERE a.id = :alert_id
+        """
+            ),
+            {"alert_id": alert_id},
+        ).mappings().first()
+        
+        if not alert:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
+        
+        # Проверка доступа для рабочих
+        if current_user["role"] == "worker":
+            if alert["greenhouse_id"]:
+                has_access = conn.execute(
+                    text(
+                        """
+                    SELECT 1 FROM user_greenhouses
+                    WHERE user_id=:user_id AND greenhouse_id=:gh_id
+                """
+                    ),
+                    {"user_id": current_user["id"], "gh_id": alert["greenhouse_id"]},
+                ).scalar()
+                if not has_access:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied to this alert",
+                    )
+        
+        # Отмечаем как прочитанный
+        updated = conn.execute(
+            text(
+                """
+            UPDATE alerts
+            SET is_read = 1
+            WHERE id = :alert_id
+        """
+            ),
+            {"alert_id": alert_id},
+        ).rowcount
+        
+        if updated == 0:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
+    
+    logger.info("Alert %s отмечен как прочитанный пользователем %s", alert_id, current_user["id"])
+
+
+@router.patch("/greenhouses/{gh_id}/alerts/read", status_code=204)
+def mark_greenhouse_alerts_as_read(
+    gh_id: str,
+    alert_type: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Отметить все alerts для теплицы (или определенного типа) как прочитанные."""
+    with engine.begin() as conn:
+        # Проверка доступа
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": gh_id},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+        
+        # Проверка существования теплицы
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        if not gh_exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found")
+        
+        # Обновляем alerts
+        if alert_type:
+            # Отмечаем только alerts определенного типа
+            conn.execute(
+                text(
+                    """
+                UPDATE alerts
+                SET is_read = 1
+                WHERE greenhouse_id = :gh_id
+                AND type = :alert_type
+                AND is_read = 0
+            """
+                ),
+                {"gh_id": gh_id, "alert_type": alert_type},
+            )
+        else:
+            # Отмечаем все alerts для теплицы
+            conn.execute(
+                text(
+                    """
+                UPDATE alerts
+                SET is_read = 1
+                WHERE greenhouse_id = :gh_id
+                AND is_read = 0
+            """
+                ),
+                {"gh_id": gh_id},
+            )
+    
+    logger.info(
+        "Alerts для теплицы %s (type: %s) отмечены как прочитанные пользователем %s",
+        gh_id,
+        alert_type or "all",
+        current_user["id"],
+    )
 
 
 # --- Watering Check (Background Task) ---
