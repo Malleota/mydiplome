@@ -1903,7 +1903,7 @@ def receive_sensor_data(payload: SensorDataIn):
 @router.get("/greenhouses/{gh_id}/sensor-data/current", response_model=SensorReadingOut)
 def get_current_sensor_data(gh_id: str, current_user: dict = Depends(get_current_user)):
     """Получение текущих данных датчика для теплицы."""
-    with engine.begin() as conn:
+    with engine.connect() as conn:
         # Проверка доступа для рабочих
         if current_user["role"] == "worker":
             has_access = conn.execute(
@@ -1948,96 +1948,34 @@ def get_current_sensor_data(gh_id: str, current_user: dict = Depends(get_current
             {"gh_id": gh_id},
         ).mappings().first()
         
-        # Функция для проверки, устарели ли данные (больше 1 минуты)
-        def is_data_stale(update_time):
-            if update_time is None:
-                return True
-            if isinstance(update_time, str):
-                update_time = datetime.fromisoformat(update_time.replace("Z", "+00:00"))
-            if isinstance(update_time, datetime):
-                # Убираем timezone для сравнения
-                if update_time.tzinfo is not None:
-                    update_time = update_time.replace(tzinfo=None)
-                time_diff = datetime.now() - update_time
-                return time_diff > timedelta(minutes=1)
-            return True
-        
-        if reading:
-            # Проверяем, не устарели ли данные из истории
-            if is_data_stale(reading["created_at"]):
-                # Данные устарели, обновляем значения в таблице sensors на NULL
-                conn.execute(
-                    text(
-                        """
-                        UPDATE sensors
-                        SET last_temperature = NULL,
-                            last_humidity = NULL
-                        WHERE id = :sensor_id
+        if not reading:
+            # Если нет истории, берем из таблицы sensors
+            sensor = conn.execute(
+                text(
                     """
-                    ),
-                    {"sensor_id": reading["sensor_id"]},
-                )
-                # Возвращаем пустые значения
-                return SensorReadingOut(
-                    id=reading["id"],
-                    sensor_id=reading["sensor_id"],
-                    greenhouse_id=reading["greenhouse_id"],
-                    temperature=None,
-                    humidity=None,
-                    created_at=reading["created_at"],
-                )
-            return SensorReadingOut(**reading)
-        
-        # Если нет истории, берем из таблицы sensors
-        sensor = conn.execute(
-            text(
-                """
                 SELECT id, last_temperature as temperature, last_humidity as humidity, last_update as created_at
                 FROM sensors
                 WHERE id = :sensor_id
             """
-            ),
-            {"sensor_id": gh["sensor_id"]},
-        ).mappings().first()
-        
-        if not sensor:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="No sensor data available"
-            )
-        
-        # Проверяем, не устарели ли данные
-        if is_data_stale(sensor["created_at"]) or sensor["temperature"] is None:
-            # Данные устарели или отсутствуют, обновляем значения в базе на NULL
-            if sensor["temperature"] is not None or sensor["humidity"] is not None:
-                conn.execute(
-                    text(
-                        """
-                        UPDATE sensors
-                        SET last_temperature = NULL,
-                            last_humidity = NULL
-                        WHERE id = :sensor_id
-                    """
-                    ),
-                    {"sensor_id": sensor["id"]},
+                ),
+                {"sensor_id": gh["sensor_id"]},
+            ).mappings().first()
+            
+            if not sensor or sensor["temperature"] is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="No sensor data available"
                 )
-            # Возвращаем пустые значения
+            
             return SensorReadingOut(
                 id="",
                 sensor_id=sensor["id"],
                 greenhouse_id=gh_id,
-                temperature=None,
-                humidity=None,
+                temperature=sensor["temperature"],
+                humidity=sensor["humidity"],
                 created_at=sensor["created_at"] or datetime.now(),
             )
         
-        return SensorReadingOut(
-            id="",
-            sensor_id=sensor["id"],
-            greenhouse_id=gh_id,
-            temperature=sensor["temperature"],
-            humidity=sensor["humidity"],
-            created_at=sensor["created_at"] or datetime.now(),
-        )
+        return SensorReadingOut(**reading)
 
 
 @router.get("/greenhouses/{gh_id}/sensor-data", response_model=List[SensorReadingOut])
