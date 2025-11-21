@@ -2532,3 +2532,22 @@ def trigger_watering_check(admin: dict = Depends(require_admin)):
     check_watering_schedules()
     return {"message": "Watering check completed"}
 
+
+@router.get("/scheduler/status")
+def get_scheduler_status(admin: dict = Depends(require_admin)):
+    """Получить статус scheduler и информацию о запланированных задачах. Доступ: admin."""
+    from .config import scheduler
+    
+    jobs = scheduler.get_jobs()
+    return {
+        "running": scheduler.running,
+        "jobs": [
+            {
+                "id": job.id,
+                "name": job.name,
+                "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+            }
+            for job in jobs
+        ],
+    }
+

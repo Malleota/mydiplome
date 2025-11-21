@@ -1,8 +1,11 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
@@ -35,6 +38,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # SQLAlchemy engine
 engine = create_engine(DSN, connect_args={"check_same_thread": False}, echo=False)
+
+# Scheduler для периодических задач
+scheduler = AsyncIOScheduler()
 
 # Base URL configuration
 BASE_URL = os.getenv("BASE_URL", "http://95.140.158.180:8000")
@@ -82,7 +88,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error("Ошибка при инициализации: %s", exc)
         raise
 
+    # Импортируем функцию проверки (чтобы избежать циклических импортов)
+    from .api import check_watering_schedules
+
+    async def run_watering_check():
+        """Обертка для запуска синхронной функции check_watering_schedules в executor."""
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, check_watering_schedules)
+            logger.info("Ежедневная проверка полива и удобрения выполнена")
+        except Exception as e:
+            logger.error("Ошибка при выполнении проверки полива: %s", e)
+
+    # Настраиваем задачу на запуск каждый день в 00:01
+    scheduler.add_job(
+        run_watering_check,
+        trigger=CronTrigger(hour=0, minute=1),  # Каждый день в 00:01
+        id="daily_watering_check",
+        name="Ежедневная проверка полива и удобрения",
+        replace_existing=True,
+    )
+
+    scheduler.start()
+    logger.info("Scheduler запущен. Проверка полива будет выполняться каждый день в 00:01")
+
     yield
 
+    # Останавливаем scheduler при завершении
+    scheduler.shutdown(wait=False)
     logger.info("Завершение работы сервера...")
 
