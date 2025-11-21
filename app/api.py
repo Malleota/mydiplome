@@ -6,7 +6,7 @@ import shutil
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import text
 
@@ -27,6 +27,9 @@ from .dependencies import (
     send_push_notification,
     verify_password,
 )
+from .websocket_manager import manager
+from jose import jwt
+from .config import JWT_SECRET_KEY, JWT_ALGORITHM
 from .schemas import (
     AlertOut,
     AvatarOut,
@@ -1657,9 +1660,137 @@ def create_watering_event(payload: WaterEventCreate, current_user: dict = Depend
     return WaterEventOut(**row)
 
 
+# --- WebSocket для получения данных с датчиков в реальном времени ---
+@router.websocket("/ws/sensor-data")
+async def websocket_sensor_data_all(websocket: WebSocket, token: Optional[str] = None):
+    """
+    WebSocket endpoint для получения обновлений данных с датчиков для всех теплиц (только для админов).
+    Клиенты получают обновления сразу после получения данных от датчика.
+    
+    Параметры:
+    - token (query parameter): JWT токен для аутентификации (обязательно)
+    """
+    # Проверка аутентификации
+    user = None
+    if token:
+        try:
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            user_id = payload.get("sub")
+            if user_id:
+                with engine.connect() as conn:
+                    user = conn.execute(
+                        text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
+                        {"id": user_id},
+                    ).mappings().first()
+        except Exception as e:
+            logger.warning("Ошибка проверки токена WebSocket: %s", e)
+    
+    if not user:
+        await websocket.close(code=1008)
+        return
+    
+    # Только админы могут подписаться на все теплицы
+    if user["role"] != "admin":
+        await websocket.close(code=1008)
+        return
+    
+    # Подключаем клиента (без конкретной теплицы - все теплицы)
+    await manager.connect(websocket, None)
+    
+    try:
+        # Отправляем подтверждение подключения
+        await websocket.send_json({
+            "type": "connected",
+            "greenhouse_id": None,
+            "message": "Подключено к обновлениям данных с датчиков для всех теплиц"
+        })
+        
+        # Ожидаем сообщения от клиента (можно использовать для heartbeat)
+        while True:
+            try:
+                data = await websocket.receive_text()
+                # Обработка heartbeat или других сообщений от клиента
+                if data == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except WebSocketDisconnect:
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.disconnect(websocket, None)
+
+
+@router.websocket("/ws/sensor-data/{greenhouse_id}")
+async def websocket_sensor_data(websocket: WebSocket, greenhouse_id: str, token: Optional[str] = None):
+    """
+    WebSocket endpoint для получения обновлений данных с датчиков в реальном времени.
+    Клиенты подключаются к конкретной теплице и получают обновления сразу после получения данных от датчика.
+    
+    Параметры:
+    - greenhouse_id: ID теплицы для подписки на обновления
+    - token (query parameter): JWT токен для аутентификации (опционально, но рекомендуется)
+    """
+    # Проверка аутентификации, если токен предоставлен
+    user = None
+    if token:
+        try:
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            user_id = payload.get("sub")
+            if user_id:
+                with engine.connect() as conn:
+                    user = conn.execute(
+                        text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
+                        {"id": user_id},
+                    ).mappings().first()
+        except Exception as e:
+            logger.warning("Ошибка проверки токена WebSocket: %s", e)
+    
+    # Проверка доступа к теплице
+    if user:
+        with engine.connect() as conn:
+            if user["role"] == "worker":
+                has_access = conn.execute(
+                    text(
+                        """
+                        SELECT 1 FROM user_greenhouses
+                        WHERE user_id=:user_id AND greenhouse_id=:gh_id
+                    """
+                    ),
+                    {"user_id": user["id"], "gh_id": greenhouse_id},
+                ).scalar()
+                if not has_access:
+                    await websocket.close(code=1008)
+                    return
+    
+    # Подключаем клиента
+    await manager.connect(websocket, greenhouse_id)
+    
+    try:
+        # Отправляем подтверждение подключения
+        await websocket.send_json({
+            "type": "connected",
+            "greenhouse_id": greenhouse_id,
+            "message": "Подключено к обновлениям данных с датчиков"
+        })
+        
+        # Ожидаем сообщения от клиента (можно использовать для heartbeat)
+        while True:
+            try:
+                data = await websocket.receive_text()
+                # Обработка heartbeat или других сообщений от клиента
+                if data == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except WebSocketDisconnect:
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.disconnect(websocket, greenhouse_id)
+
+
 # --- BLE Sensor Data ---
 @router.post("/sensors/data", status_code=204)
-def receive_sensor_data(payload: SensorDataIn):
+async def receive_sensor_data(payload: SensorDataIn):
     """
     Приём данных от BLE-датчика (температура, влажность).
     Сохраняет данные в историю и обновляет последние значения.
@@ -1893,6 +2024,20 @@ def receive_sensor_data(payload: SensorDataIn):
                             alert_msg,
                             f"Предупреждение: {sensor['greenhouse_name']}",
                         )
+            
+            # Отправляем данные через WebSocket всем подписанным клиентам
+            sensor_reading = {
+                "type": "sensor_data",
+                "greenhouse_id": sensor["greenhouse_id"],
+                "sensor_id": sensor["id"],
+                "temperature": payload.temperature,
+                "humidity": payload.humidity,
+                "timestamp": datetime.now().isoformat(),
+            }
+            # Отправляем клиентам, подписанным на конкретную теплицу
+            await manager.broadcast_to_greenhouse(sensor_reading, sensor["greenhouse_id"])
+            # Отправляем всем клиентам, подписанным на все теплицы (админы)
+            await manager.broadcast_to_all(sensor_reading)
 
     logger.info(
         "Данные от датчика %s: temp=%s, hum=%s",
