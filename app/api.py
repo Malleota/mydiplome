@@ -2425,11 +2425,28 @@ def check_watering_schedules():
         ).mappings().all()
 
         for plant in overdue_plants:
+            # Вычисляем актуальные дни просрочки
+            days_overdue = 0
+            if plant["last_watering"]:
+                try:
+                    last_date = plant["last_watering"]
+                    if isinstance(last_date, str):
+                        last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
+                    if isinstance(last_date, datetime):
+                        days_passed = (datetime.now() - last_date.replace(tzinfo=None)).days
+                        days_overdue = max(0, days_passed - plant["watering_interval_days"])
+                except Exception:
+                    days_overdue = 0
+
+            message = f"Требуется полив: {plant['plant_name']}"
+            if days_overdue > 0:
+                message += f" (просрочено на {days_overdue} дней)"
+
             # Проверяем, есть ли уже непрочитанный alert такого же типа
             existing_alert = conn.execute(
                 text(
                     """
-                SELECT 1 FROM alerts
+                SELECT id FROM alerts
                 WHERE greenhouse_id = :gh_id
                 AND type = 'watering_overdue'
                 AND is_read = 0
@@ -2437,26 +2454,31 @@ def check_watering_schedules():
             """
                 ),
                 {"gh_id": plant["greenhouse_id"]},
-            ).scalar()
+            ).mappings().first()
 
-            if not existing_alert:
+            if existing_alert:
+                # Обновляем существующий alert с актуальными данными
+                conn.execute(
+                    text(
+                        """
+                    UPDATE alerts
+                    SET message = :msg, created_at = CURRENT_TIMESTAMP
+                    WHERE id = :alert_id
+                """
+                    ),
+                    {
+                        "alert_id": existing_alert["id"],
+                        "msg": message,
+                    },
+                )
+                logger.info(
+                    "Обновлен alert о просрочке полива для теплицы %s: %s",
+                    plant["greenhouse_id"],
+                    message,
+                )
+            else:
+                # Создаем новый alert
                 alert_id = new_id()
-                days_overdue = 0
-                if plant["last_watering"]:
-                    try:
-                        last_date = plant["last_watering"]
-                        if isinstance(last_date, str):
-                            last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
-                        if isinstance(last_date, datetime):
-                            days_passed = (datetime.now() - last_date.replace(tzinfo=None)).days
-                            days_overdue = max(0, days_passed - plant["watering_interval_days"])
-                    except Exception:
-                        days_overdue = 0
-
-                message = f"Требуется полив: {plant['plant_name']}"
-                if days_overdue > 0:
-                    message += f" (просрочено на {days_overdue} дней)"
-
                 conn.execute(
                     text(
                         """
@@ -2470,7 +2492,13 @@ def check_watering_schedules():
                         "msg": message,
                     },
                 )
+                logger.info(
+                    "Создан новый alert о просрочке полива для теплицы %s: %s",
+                    plant["greenhouse_id"],
+                    message,
+                )
 
+                # Отправляем уведомление только при создании нового alert
                 workers = conn.execute(
                     text(
                         """
@@ -2513,11 +2541,28 @@ def check_watering_schedules():
         ).mappings().all()
 
         for plant in overdue_fertilizing:
+            # Вычисляем актуальные дни просрочки
+            days_overdue = 0
+            if plant["last_fertilizing"]:
+                try:
+                    last_date = plant["last_fertilizing"]
+                    if isinstance(last_date, str):
+                        last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
+                    if isinstance(last_date, datetime):
+                        days_passed = (datetime.now() - last_date.replace(tzinfo=None)).days
+                        days_overdue = max(0, days_passed - plant["fertilizing_interval_days"])
+                except Exception:
+                    days_overdue = 0
+
+            message = f"Требуется удобрение: {plant['plant_name']}"
+            if days_overdue > 0:
+                message += f" (просрочено на {days_overdue} дней)"
+
             # Проверяем, есть ли уже непрочитанный alert такого же типа
             existing_alert = conn.execute(
                 text(
                     """
-                SELECT 1 FROM alerts
+                SELECT id FROM alerts
                 WHERE greenhouse_id = :gh_id
                 AND type = 'fertilizing_overdue'
                 AND is_read = 0
@@ -2525,26 +2570,31 @@ def check_watering_schedules():
             """
                 ),
                 {"gh_id": plant["greenhouse_id"]},
-            ).scalar()
+            ).mappings().first()
 
-            if not existing_alert:
+            if existing_alert:
+                # Обновляем существующий alert с актуальными данными
+                conn.execute(
+                    text(
+                        """
+                    UPDATE alerts
+                    SET message = :msg, created_at = CURRENT_TIMESTAMP
+                    WHERE id = :alert_id
+                """
+                    ),
+                    {
+                        "alert_id": existing_alert["id"],
+                        "msg": message,
+                    },
+                )
+                logger.info(
+                    "Обновлен alert о просрочке удобрения для теплицы %s: %s",
+                    plant["greenhouse_id"],
+                    message,
+                )
+            else:
+                # Создаем новый alert
                 alert_id = new_id()
-                days_overdue = 0
-                if plant["last_fertilizing"]:
-                    try:
-                        last_date = plant["last_fertilizing"]
-                        if isinstance(last_date, str):
-                            last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
-                        if isinstance(last_date, datetime):
-                            days_passed = (datetime.now() - last_date.replace(tzinfo=None)).days
-                            days_overdue = max(0, days_passed - plant["fertilizing_interval_days"])
-                    except Exception:
-                        days_overdue = 0
-
-                message = f"Требуется удобрение: {plant['plant_name']}"
-                if days_overdue > 0:
-                    message += f" (просрочено на {days_overdue} дней)"
-
                 conn.execute(
                     text(
                         """
@@ -2558,7 +2608,13 @@ def check_watering_schedules():
                         "msg": message,
                     },
                 )
+                logger.info(
+                    "Создан новый alert о просрочке удобрения для теплицы %s: %s",
+                    plant["greenhouse_id"],
+                    message,
+                )
 
+                # Отправляем уведомление только при создании нового alert
                 workers = conn.execute(
                     text(
                         """
