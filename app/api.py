@@ -1,3 +1,5 @@
+        # Используем локальные пути на сервере
+
 import os
 import random
 import shutil
