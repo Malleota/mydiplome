@@ -1601,7 +1601,7 @@ def get_reports(
 
 
 @router.post("/watering-events", response_model=WaterEventOut, status_code=201)
-def create_watering_event(payload: WaterEventCreate, current_user: dict = Depends(get_current_user)):
+async def create_watering_event(payload: WaterEventCreate, current_user: dict = Depends(get_current_user)):
     ev_id = new_id()
     with engine.begin() as conn:
         gh = conn.execute(text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": payload.greenhouse_id}).scalar()
@@ -1642,6 +1642,46 @@ def create_watering_event(payload: WaterEventCreate, current_user: dict = Depend
             },
         )
 
+        # Удаляем соответствующие alerts после создания события полива/удобрения
+        if payload.type == "watering":
+            # Удаляем alerts о просрочке полива для этой теплицы
+            deleted_count = conn.execute(
+                text(
+                    """
+                DELETE FROM alerts
+                WHERE greenhouse_id = :gh_id
+                AND type = 'watering_overdue'
+                AND is_read = 0
+            """
+                ),
+                {"gh_id": payload.greenhouse_id},
+            ).rowcount
+            if deleted_count > 0:
+                logger.info(
+                    "Удалено %d alert(s) о просрочке полива для теплицы %s после создания события полива",
+                    deleted_count,
+                    payload.greenhouse_id,
+                )
+        elif payload.type == "fertilizing":
+            # Удаляем alerts о просрочке удобрения для этой теплицы
+            deleted_count = conn.execute(
+                text(
+                    """
+                DELETE FROM alerts
+                WHERE greenhouse_id = :gh_id
+                AND type = 'fertilizing_overdue'
+                AND is_read = 0
+            """
+                ),
+                {"gh_id": payload.greenhouse_id},
+            ).rowcount
+            if deleted_count > 0:
+                logger.info(
+                    "Удалено %d alert(s) о просрочке удобрения для теплицы %s после создания события удобрения",
+                    deleted_count,
+                    payload.greenhouse_id,
+                )
+
         row = (
             conn.execute(
                 text(
@@ -1655,6 +1695,17 @@ def create_watering_event(payload: WaterEventCreate, current_user: dict = Depend
             .mappings()
             .first()
         )
+
+    # Отправляем обновление через WebSocket для всех подписанных клиентов
+    update_message = {
+        "type": "watering_event_created",
+        "greenhouse_id": payload.greenhouse_id,
+        "event_type": payload.type,
+        "plant_instance_id": payload.plant_instance_id,
+        "message": f"Событие {payload.type} создано",
+    }
+    await manager.broadcast_to_greenhouse(update_message, payload.greenhouse_id)
+    await manager.broadcast_to_all(update_message)
 
     logger.info("Событие %s создано для теплицы %s", payload.type, payload.greenhouse_id)
     return WaterEventOut(**row)
