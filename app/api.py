@@ -1119,7 +1119,7 @@ def get_next_watering_greenhouse(gh_id: str, current_user: dict = Depends(get_cu
             {"gh_id": gh_id},
         ).mappings().first()
         
-        # Находим все поливы по растениям с вычислением следующего полива
+        # Находим последний полив для каждого растения с вычислением следующего полива
         plant_waterings = conn.execute(
             text(
                 """
@@ -1128,14 +1128,19 @@ def get_next_watering_greenhouse(gh_id: str, current_user: dict = Depends(get_cu
                 we.greenhouse_id,
                 we.plant_instance_id,
                 we.created_at,
-                pt.watering_interval_days,
-                datetime(we.created_at, '+' || pt.watering_interval_days || ' days') as next_watering_date
+                pt.watering_interval_days
             FROM watering_events we
             INNER JOIN plant_instances pi ON we.plant_instance_id = pi.id
             INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
             WHERE we.greenhouse_id = :gh_id
                 AND we.type = 'watering'
                 AND pt.watering_interval_days IS NOT NULL
+                AND we.created_at = (
+                    SELECT MAX(we2.created_at)
+                    FROM watering_events we2
+                    WHERE we2.plant_instance_id = we.plant_instance_id
+                    AND we2.type = 'watering'
+                )
             ORDER BY we.created_at DESC
         """
             ),
@@ -1143,6 +1148,7 @@ def get_next_watering_greenhouse(gh_id: str, current_user: dict = Depends(get_cu
         ).mappings().all()
         
         now = datetime.now()
+        today = now.date()
         closest_watering = None
         closest_days = None
         
@@ -1153,13 +1159,16 @@ def get_next_watering_greenhouse(gh_id: str, current_user: dict = Depends(get_cu
         
         # Обрабатываем поливы по растениям, находим ближайший следующий
         for pw in plant_waterings:
-            next_date = pw["next_watering_date"]
-            if next_date:
-                if isinstance(next_date, str):
-                    next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
-                if isinstance(next_date, datetime):
-                    next_date = next_date.replace(tzinfo=None)
-                    days_until = (next_date - now).days
+            # Вычисляем дни до следующего полива на основе дат (без учета времени)
+            last_watering = pw["created_at"]
+            if last_watering:
+                if isinstance(last_watering, str):
+                    last_watering = datetime.fromisoformat(last_watering.replace("Z", "+00:00"))
+                if isinstance(last_watering, datetime):
+                    last_watering = last_watering.replace(tzinfo=None)
+                    last_watering_date = last_watering.date()
+                    days_passed = (today - last_watering_date).days
+                    days_until = pw["watering_interval_days"] - days_passed
                     
                     # Если это первый найденный или ближе чем предыдущий
                     if closest_days is None or days_until < closest_days:
@@ -1244,9 +1253,9 @@ def get_next_watering_plants(gh_id: str, current_user: dict = Depends(get_curren
         
         result = []
         now = datetime.now()
+        today = now.date()
         
         for row in rows:
-            next_date = row["next_watering_date"]
             days_until = None
             is_overdue = False
             
@@ -1255,17 +1264,20 @@ def get_next_watering_plants(gh_id: str, current_user: dict = Depends(get_curren
                 if row["watering_interval_days"]:
                     days_until = row["watering_interval_days"]
                     is_overdue = False
-            elif next_date:
-                # Вычисляем дни до следующего полива
-                # next_date = last_watering + interval_days
-                # days_until = next_date - now
-                # Пример: полили вчера, интервал 3 дня -> next_date = послезавтра -> days_until = 2
-                # Если days_until = 0, полив сегодня - на фронте должна отображаться кнопка "Полить"
-                if isinstance(next_date, str):
-                    next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
-                if isinstance(next_date, datetime):
-                    next_date = next_date.replace(tzinfo=None)
-                    days_until = (next_date - now).days
+            else:
+                # Вычисляем дни до следующего полива на основе дат (без учета времени)
+                # days_passed = (сегодня - дата_последнего_полива) в днях
+                # days_until = interval_days - days_passed
+                # Пример: полили вчера, интервал 3 дня -> days_passed = 1 -> days_until = 2
+                # Если days_until <= 0, полив сегодня или просрочен - показываем кнопку "Полить"
+                last_watering = row["last_watering"]
+                if isinstance(last_watering, str):
+                    last_watering = datetime.fromisoformat(last_watering.replace("Z", "+00:00"))
+                if isinstance(last_watering, datetime):
+                    last_watering = last_watering.replace(tzinfo=None)
+                    last_watering_date = last_watering.date()
+                    days_passed = (today - last_watering_date).days
+                    days_until = row["watering_interval_days"] - days_passed
                     is_overdue = days_until < 0
             
             result.append(
@@ -2430,16 +2442,20 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
         ).mappings().all()
         
         now = datetime.now()
+        today = now.date()
         
         for plant in plants:
             if plant["last_watering"]:
-                # Вычисляем дни до следующего полива
+                # Вычисляем дни до следующего полива на основе дат (без учета времени)
+                # days_passed = (сегодня - дата_последнего_полива) в днях
+                # days_until = interval_days - days_passed
                 last_date = plant["last_watering"]
                 if isinstance(last_date, str):
                     last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
                 if isinstance(last_date, datetime):
                     last_date = last_date.replace(tzinfo=None)
-                    days_passed = (now - last_date).days
+                    last_watering_date = last_date.date()
+                    days_passed = (today - last_watering_date).days
                     days_until = plant["watering_interval_days"] - days_passed
                     
                     # Если полив просрочен или сегодня, проверяем наличие alert
