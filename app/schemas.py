@@ -108,6 +108,12 @@ class PlantInstanceOut(BaseModel):
     note: Optional[str] = None
 
 
+class PlantInstanceUpdate(BaseModel):
+    plant_type_id: Optional[str] = None
+    quantity: Optional[int] = Field(None, ge=1)
+    note: Optional[str] = None
+
+
 class BindSensorIn(BaseModel):
     ble_identifier: str
 

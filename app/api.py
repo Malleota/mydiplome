@@ -42,6 +42,7 @@ from .schemas import (
     NextWateringOut,
     PlantInstanceCreate,
     PlantInstanceOut,
+    PlantInstanceUpdate,
     PlantTypeCreate,
     PlantTypeOut,
     ReportOut,
@@ -1021,6 +1022,95 @@ def delete_plant_instance(gh_id: str, pi_id: str, admin: dict = Depends(require_
 
         conn.execute(text("DELETE FROM plant_instances WHERE id=:id"), {"id": pi_id})
     logger.info("Растение %s удалено из теплицы %s", pi_id, gh_id)
+
+
+@router.patch("/greenhouses/{gh_id}/plants/{pi_id}", response_model=PlantInstanceOut)
+def update_plant_instance(
+    gh_id: str, 
+    pi_id: str, 
+    payload: PlantInstanceUpdate, 
+    admin: dict = Depends(require_admin)
+):
+    """Обновление растения в теплице. Доступ: admin."""
+    with engine.begin() as conn:
+        # Проверяем существование растения
+        pi = conn.execute(
+            text(
+                """
+                SELECT id, plant_type_id FROM plant_instances
+                WHERE id=:pi_id AND greenhouse_id=:gh_id
+            """
+            ),
+            {"pi_id": pi_id, "gh_id": gh_id},
+        ).mappings().first()
+        if not pi:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Plant instance not found in this greenhouse",
+            )
+        
+        # Если меняется тип растения, проверяем его существование
+        if payload.plant_type_id is not None:
+            pt_exists = conn.execute(
+                text("SELECT 1 FROM plant_types WHERE id=:id"),
+                {"id": payload.plant_type_id},
+            ).scalar()
+            if not pt_exists:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Plant type not found",
+                )
+        
+        # Формируем запрос UPDATE только для переданных полей
+        update_fields = []
+        params = {"pi_id": pi_id, "gh_id": gh_id}
+        
+        if payload.plant_type_id is not None:
+            update_fields.append("plant_type_id = :pt_id")
+            params["pt_id"] = payload.plant_type_id
+        
+        if payload.quantity is not None:
+            update_fields.append("quantity = :qty")
+            params["qty"] = payload.quantity
+        
+        if payload.note is not None:
+            update_fields.append("note = :note")
+            params["note"] = payload.note
+        
+        if not update_fields:
+            # Если ничего не передано для обновления, просто возвращаем текущее состояние
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, greenhouse_id, plant_type_id, quantity, note
+                    FROM plant_instances WHERE id=:pi_id
+                """
+                ),
+                {"pi_id": pi_id},
+            ).mappings().first()
+            return PlantInstanceOut(**row)
+        
+        # Выполняем обновление
+        update_sql = f"""
+            UPDATE plant_instances
+            SET {', '.join(update_fields)}
+            WHERE id=:pi_id AND greenhouse_id=:gh_id
+        """
+        conn.execute(text(update_sql), params)
+        
+        # Получаем обновленные данные
+        row = conn.execute(
+            text(
+                """
+                SELECT id, greenhouse_id, plant_type_id, quantity, note
+                FROM plant_instances WHERE id=:pi_id
+            """
+            ),
+            {"pi_id": pi_id},
+        ).mappings().first()
+    
+    logger.info("Растение %s обновлено в теплице %s", pi_id, gh_id)
+    return PlantInstanceOut(**row)
 
 
 @router.get("/greenhouses/{gh_id}/plants", response_model=List[PlantInstanceOut])
