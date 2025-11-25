@@ -140,6 +140,12 @@ class WaterEventCreate(BaseModel):
     comment: Optional[str] = None
 
 
+class WaterEventUpdate(BaseModel):
+    """Схема для обновления события полива/удобрения."""
+    comment: Optional[str] = None
+    type: Optional[str] = Field(None, pattern="^(watering|fertilizing)$")
+
+
 class WaterEventOut(BaseModel):
     id: str
     greenhouse_id: str

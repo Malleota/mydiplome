@@ -55,6 +55,7 @@ from .schemas import (
     UserRoleUpdate,
     WaterEventCreate,
     WaterEventOut,
+    WaterEventUpdate,
 )
 
 router = APIRouter()
@@ -1668,6 +1669,7 @@ def get_next_fertilizing_plants(gh_id: str, current_user: dict = Depends(get_cur
             )
         
         # Получаем все растения в теплице с информацией о последнем удобрении
+        # Используем сохраненные next_fertilizing_date и fertilizing_days_until, если они есть
         rows = conn.execute(
             text(
                 """
@@ -1677,14 +1679,15 @@ def get_next_fertilizing_plants(gh_id: str, current_user: dict = Depends(get_cur
                 pt.name as plant_name,
                 pt.fertilizing_interval_days,
                 MAX(we.created_at) as last_fertilizing,
-                datetime(MAX(we.created_at), '+' || pt.fertilizing_interval_days || ' days') as next_fertilizing_date
+                COALESCE(pi.next_fertilizing_date, datetime(MAX(we.created_at), '+' || pt.fertilizing_interval_days || ' days')) as next_fertilizing_date,
+                pi.fertilizing_days_until
             FROM plant_instances pi
             INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
             LEFT JOIN watering_events we ON we.plant_instance_id = pi.id 
                 AND we.type = 'fertilizing'
             WHERE pi.greenhouse_id = :gh_id
                 AND pt.fertilizing_interval_days IS NOT NULL
-            GROUP BY pi.id, pi.greenhouse_id, pt.name, pt.fertilizing_interval_days
+            GROUP BY pi.id, pi.greenhouse_id, pt.name, pt.fertilizing_interval_days, pi.next_fertilizing_date, pi.fertilizing_days_until
             ORDER BY next_fertilizing_date ASC NULLS LAST
         """
             ),
@@ -1693,33 +1696,64 @@ def get_next_fertilizing_plants(gh_id: str, current_user: dict = Depends(get_cur
         
         result = []
         now = datetime.now()
+        today = now.date()
         
         for row in rows:
-            next_date = row["next_fertilizing_date"]
-            days_until = None
+            fertilizing_days_until = None
             is_overdue = False
+            next_fertilizing_date = None
             
+            # Если есть сохраненное значение fertilizing_days_until, используем его
+            if row["fertilizing_days_until"] is not None:
+                fertilizing_days_until = row["fertilizing_days_until"]
+                is_overdue = fertilizing_days_until < 0
+                next_fertilizing_date = None
+                if row["next_fertilizing_date"]:
+                    # Используем сохраненную дату следующего удобрения, если есть
+                    if isinstance(row["next_fertilizing_date"], str):
+                        next_fertilizing_date = datetime.fromisoformat(row["next_fertilizing_date"].replace("Z", "+00:00"))
+                    else:
+                        next_fertilizing_date = row["next_fertilizing_date"]
+                elif row["last_fertilizing"]:
+                    next_fertilizing_date = row["last_fertilizing"]
             # Если удобрения не было, следующее удобрение - через интервал от текущей даты
-            if not row["last_fertilizing"]:
+            elif not row["last_fertilizing"]:
                 if row["fertilizing_interval_days"]:
-                    days_until = row["fertilizing_interval_days"]
-                    is_overdue = False
-            elif next_date:
-                # Вычисляем дни до следующего удобрения
-                if isinstance(next_date, str):
-                    next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
-                if isinstance(next_date, datetime):
-                    next_date = next_date.replace(tzinfo=None)
-                    days_until = (next_date - now).days
-                    is_overdue = days_until < 0
+                    fertilizing_days_until = row["fertilizing_interval_days"]
+                    next_fertilizing_date = None
+                else:
+                    next_fertilizing_date = None
+            else:
+                # Вычисляем дни до следующего удобрения на основе дат
+                next_date = row["next_fertilizing_date"]
+                if next_date:
+                    if isinstance(next_date, str):
+                        next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
+                    if isinstance(next_date, datetime):
+                        next_date = next_date.replace(tzinfo=None)
+                        next_fertilizing_date = next_date
+                        fertilizing_days_until = (next_date.date() - today).days
+                        is_overdue = fertilizing_days_until < 0
+                else:
+                    # Fallback: вычисляем на основе последнего удобрения
+                    last_fertilizing = row["last_fertilizing"]
+                    if isinstance(last_fertilizing, str):
+                        last_fertilizing = datetime.fromisoformat(last_fertilizing.replace("Z", "+00:00"))
+                    if isinstance(last_fertilizing, datetime):
+                        last_fertilizing = last_fertilizing.replace(tzinfo=None)
+                        last_fertilizing_date = last_fertilizing.date()
+                        days_passed = (today - last_fertilizing_date).days
+                        fertilizing_days_until = row["fertilizing_interval_days"] - days_passed
+                        is_overdue = fertilizing_days_until < 0
+                        next_fertilizing_date = last_fertilizing
             
             result.append(
                 NextWateringOut(
                     greenhouse_id=gh_id,
                     plant_instance_id=row["plant_instance_id"],
                     plant_name=row["plant_name"],
-                    next_watering_date=row["last_fertilizing"],
-                    days_until=days_until,
+                    next_watering_date=next_fertilizing_date or row["last_fertilizing"],
+                    days_until=fertilizing_days_until,
                     is_overdue=is_overdue,
                 )
             )
@@ -1935,10 +1969,13 @@ async def create_watering_event(payload: WaterEventCreate, current_user: dict = 
             .first()
         )
 
-    # Пересчитываем дни до следующего полива для этой теплицы (как в 00:01)
+    # Пересчитываем дни до следующего полива/удобрения для этой теплицы (как в 00:01)
     if payload.type == "watering":
         recalculate_watering_days_for_greenhouse(payload.greenhouse_id)
         logger.info("Пересчитаны дни до следующего полива для теплицы %s", payload.greenhouse_id)
+    elif payload.type == "fertilizing":
+        recalculate_fertilizing_days_for_greenhouse(payload.greenhouse_id)
+        logger.info("Пересчитаны дни до следующего удобрения для теплицы %s", payload.greenhouse_id)
 
     # Отправляем обновление через WebSocket для всех подписанных клиентов
     update_message = {
@@ -1953,6 +1990,183 @@ async def create_watering_event(payload: WaterEventCreate, current_user: dict = 
 
     logger.info("Событие %s создано для теплицы %s", payload.type, payload.greenhouse_id)
     return WaterEventOut(**row)
+
+
+@router.put("/watering-events/{event_id}", response_model=WaterEventOut)
+async def update_watering_event(
+    event_id: str,
+    payload: WaterEventUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Обновление события полива/удобрения."""
+    with engine.begin() as conn:
+        # Проверяем существование события
+        event = conn.execute(
+            text("SELECT * FROM watering_events WHERE id=:id"),
+            {"id": event_id},
+        ).mappings().first()
+        
+        if not event:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Watering event not found",
+            )
+        
+        # Проверка доступа для рабочих
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": event["greenhouse_id"]},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+        
+        # Формируем запрос на обновление
+        update_fields = []
+        params = {"id": event_id}
+        
+        if payload.comment is not None:
+            update_fields.append("comment = :comment")
+            params["comment"] = payload.comment
+        
+        if payload.type is not None:
+            update_fields.append("type = :type")
+            params["type"] = payload.type
+        
+        if not update_fields:
+            # Если нет полей для обновления, просто возвращаем текущее событие
+            row = conn.execute(
+                text(
+                    """
+            SELECT id, greenhouse_id, user_id, plant_instance_id, type, created_at, comment
+            FROM watering_events WHERE id=:id
+        """
+                ),
+                {"id": event_id},
+            ).mappings().first()
+            return WaterEventOut(**row)
+        
+        # Выполняем обновление
+        sql = f"""
+            UPDATE watering_events
+            SET {', '.join(update_fields)}
+            WHERE id = :id
+        """
+        conn.execute(text(sql), params)
+        
+        # Получаем обновленное событие
+        row = conn.execute(
+            text(
+                """
+            SELECT id, greenhouse_id, user_id, plant_instance_id, type, created_at, comment
+            FROM watering_events WHERE id=:id
+        """
+            ),
+            {"id": event_id},
+        ).mappings().first()
+        
+        # Пересчитываем дни до следующего полива/удобрения для этой теплицы
+        if payload.type is not None:
+            event_type = payload.type
+        else:
+            event_type = event["type"]
+        
+        if event_type == "watering":
+            recalculate_watering_days_for_greenhouse(event["greenhouse_id"])
+            logger.info("Пересчитаны дни до следующего полива для теплицы %s", event["greenhouse_id"])
+        elif event_type == "fertilizing":
+            recalculate_fertilizing_days_for_greenhouse(event["greenhouse_id"])
+            logger.info("Пересчитаны дни до следующего удобрения для теплицы %s", event["greenhouse_id"])
+    
+    # Отправляем обновление через WebSocket
+    update_message = {
+        "type": "watering_event_updated",
+        "greenhouse_id": event["greenhouse_id"],
+        "event_id": event_id,
+        "event_type": event_type,
+        "message": f"Событие {event_type} обновлено",
+    }
+    await manager.broadcast_to_greenhouse(update_message, event["greenhouse_id"])
+    await manager.broadcast_to_all(update_message)
+    
+    logger.info("Событие %s обновлено: %s", event_type, event_id)
+    return WaterEventOut(**row)
+
+
+@router.delete("/watering-events/{event_id}", status_code=204)
+async def delete_watering_event(
+    event_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Удаление события полива/удобрения."""
+    with engine.begin() as conn:
+        # Проверяем существование события
+        event = conn.execute(
+            text("SELECT * FROM watering_events WHERE id=:id"),
+            {"id": event_id},
+        ).mappings().first()
+        
+        if not event:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Watering event not found",
+            )
+        
+        # Проверка доступа для рабочих
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": event["greenhouse_id"]},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+        
+        # Сохраняем информацию о событии перед удалением
+        event_type = event["type"]
+        greenhouse_id = event["greenhouse_id"]
+        
+        # Удаляем событие
+        conn.execute(
+            text("DELETE FROM watering_events WHERE id=:id"),
+            {"id": event_id},
+        )
+        
+        # Пересчитываем дни до следующего полива/удобрения для этой теплицы
+        if event_type == "watering":
+            recalculate_watering_days_for_greenhouse(greenhouse_id)
+            logger.info("Пересчитаны дни до следующего полива для теплицы %s", greenhouse_id)
+        elif event_type == "fertilizing":
+            recalculate_fertilizing_days_for_greenhouse(greenhouse_id)
+            logger.info("Пересчитаны дни до следующего удобрения для теплицы %s", greenhouse_id)
+    
+    # Отправляем обновление через WebSocket
+    update_message = {
+        "type": "watering_event_deleted",
+        "greenhouse_id": greenhouse_id,
+        "event_id": event_id,
+        "event_type": event_type,
+        "message": f"Событие {event_type} удалено",
+    }
+    await manager.broadcast_to_greenhouse(update_message, greenhouse_id)
+    await manager.broadcast_to_all(update_message)
+    
+    logger.info("Событие %s удалено: %s", event_type, event_id)
 
 
 # --- WebSocket для получения данных с датчиков в реальном времени ---
@@ -2748,15 +2962,125 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
             )
 
 
+def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
+    """
+    Пересчитывает дни до следующего удобрения для всех растений в теплице.
+    Вызывается после удобрения или ежедневно в 00:01.
+    """
+    with engine.begin() as conn:
+        # Получаем все растения в теплице с их последними удобрениями
+        plants = conn.execute(
+            text(
+                """
+                SELECT 
+                    pi.id as plant_instance_id,
+                    pt.fertilizing_interval_days,
+                    MAX(we.created_at) as last_fertilizing
+                FROM plant_instances pi
+                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
+                LEFT JOIN watering_events we ON we.plant_instance_id = pi.id 
+                    AND we.type = 'fertilizing'
+                WHERE pi.greenhouse_id = :gh_id
+                    AND pt.fertilizing_interval_days IS NOT NULL
+                GROUP BY pi.id, pt.fertilizing_interval_days
+            """
+            ),
+            {"gh_id": greenhouse_id},
+        ).mappings().all()
+        
+        now = datetime.now()
+        today = now.date()
+        
+        for plant in plants:
+            plant_instance_id = plant["plant_instance_id"]
+            interval_days = plant["fertilizing_interval_days"]
+            next_fertilizing_date = None
+            fertilizing_days_until = None
+            
+            if plant["last_fertilizing"]:
+                # Вычисляем дни до следующего удобрения на основе дат (без учета времени)
+                # days_passed = (сегодня - дата_последнего_удобрения) в днях
+                # fertilizing_days_until = interval_days - days_passed
+                last_date = plant["last_fertilizing"]
+                if isinstance(last_date, str):
+                    last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
+                if isinstance(last_date, datetime):
+                    last_date = last_date.replace(tzinfo=None)
+                    last_fertilizing_date = last_date.date()
+                    days_passed = (today - last_fertilizing_date).days
+                    fertilizing_days_until = interval_days - days_passed
+                    
+                    # Вычисляем дату следующего удобрения
+                    next_fertilizing_date = last_date + timedelta(days=interval_days)
+                    
+                    # Если удобрение просрочено или сегодня, проверяем наличие alert
+                    if fertilizing_days_until <= 0:
+                        # Проверяем, есть ли уже alert
+                        existing_alert = conn.execute(
+                            text(
+                                """
+                                SELECT id FROM alerts
+                                WHERE greenhouse_id = :gh_id
+                                AND type = 'fertilizing_overdue'
+                                AND is_read = 0
+                                LIMIT 1
+                            """
+                            ),
+                            {"gh_id": greenhouse_id},
+                        ).mappings().first()
+                        
+                        if not existing_alert:
+                            alert_id = new_id()
+                            days_overdue = abs(fertilizing_days_until) if fertilizing_days_until < 0 else 0
+                            message = f"Требуется удобрение"
+                            if days_overdue > 0:
+                                message += f" (просрочено на {days_overdue} дней)"
+                            
+                            conn.execute(
+                                text(
+                                    """
+                                    INSERT INTO alerts (id, greenhouse_id, type, message, severity)
+                                    VALUES (:id, :gh_id, 'fertilizing_overdue', :msg, 'warning')
+                                """
+                                ),
+                                {
+                                    "id": alert_id,
+                                    "gh_id": greenhouse_id,
+                                    "msg": message,
+                                },
+                            )
+            else:
+                # Если удобрения не было, следующее удобрение - через интервал от текущей даты
+                if interval_days:
+                    next_fertilizing_date = now + timedelta(days=interval_days)
+                    fertilizing_days_until = interval_days
+            
+            # Обновляем поля next_fertilizing_date и fertilizing_days_until в таблице plant_instances
+            conn.execute(
+                text(
+                    """
+                    UPDATE plant_instances
+                    SET next_fertilizing_date = :next_date, fertilizing_days_until = :days
+                    WHERE id = :plant_id
+                """
+                ),
+                {
+                    "next_date": next_fertilizing_date,
+                    "days": fertilizing_days_until,
+                    "plant_id": plant_instance_id,
+                },
+            )
+
+
 def check_watering_schedules():
     """
-    Проверка теплиц, где подошло время полива.
-    Каждый день в 00:01 пересчитывает дни до следующего полива для всех теплиц.
+    Проверка теплиц, где подошло время полива и удобрения.
+    Каждый день в 00:01 пересчитывает дни до следующего полива и удобрения для всех теплиц.
     Если срок истёк — создаётся запись в alerts и отправляется push-уведомление.
     """
     with engine.begin() as conn:
-        # Получаем все теплицы с растениями для пересчета
-        greenhouses = conn.execute(
+        # Получаем все теплицы с растениями для пересчета полива
+        greenhouses_watering = conn.execute(
             text(
                 """
                 SELECT DISTINCT g.id as greenhouse_id
@@ -2769,8 +3093,25 @@ def check_watering_schedules():
         ).mappings().all()
         
         # Пересчитываем дни до следующего полива для каждой теплицы
-        for gh in greenhouses:
+        for gh in greenhouses_watering:
             recalculate_watering_days_for_greenhouse(gh["greenhouse_id"])
+        
+        # Получаем все теплицы с растениями для пересчета удобрений
+        greenhouses_fertilizing = conn.execute(
+            text(
+                """
+                SELECT DISTINCT g.id as greenhouse_id
+                FROM greenhouses g
+                INNER JOIN plant_instances pi ON g.id = pi.greenhouse_id
+                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
+                WHERE pt.fertilizing_interval_days IS NOT NULL
+            """
+            )
+        ).mappings().all()
+        
+        # Пересчитываем дни до следующего удобрения для каждой теплицы
+        for gh in greenhouses_fertilizing:
+            recalculate_fertilizing_days_for_greenhouse(gh["greenhouse_id"])
         
         overdue_plants = conn.execute(
             text(

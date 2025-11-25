@@ -290,6 +290,21 @@ def ensure_schema(engine: Engine, db_path: str = None):
                 logger.info("Добавлена колонка days_until в таблицу plant_instances")
             except OperationalError as e:
                 logger.warning(f"Не удалось добавить колонку days_until: {e}")
+        
+        # Миграция: добавляем поля next_fertilizing_date и fertilizing_days_until в plant_instances, если их нет
+        if "next_fertilizing_date" not in column_names:
+            try:
+                conn.execute(text("ALTER TABLE plant_instances ADD COLUMN next_fertilizing_date DATETIME"))
+                logger.info("Добавлена колонка next_fertilizing_date в таблицу plant_instances")
+            except OperationalError as e:
+                logger.warning(f"Не удалось добавить колонку next_fertilizing_date: {e}")
+        
+        if "fertilizing_days_until" not in column_names:
+            try:
+                conn.execute(text("ALTER TABLE plant_instances ADD COLUMN fertilizing_days_until INTEGER"))
+                logger.info("Добавлена колонка fertilizing_days_until в таблицу plant_instances")
+            except OperationalError as e:
+                logger.warning(f"Не удалось добавить колонку fertilizing_days_until: {e}")
     
     logger.info("Схема базы данных успешно инициализирована")
 
