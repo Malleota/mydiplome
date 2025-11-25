@@ -811,6 +811,41 @@ def unbind_worker(gh_id: str, user_id: str, admin: dict = Depends(require_admin)
     logger.info("Рабочий %s отвязан от теплицы %s", user_id, gh_id)
 
 
+@router.get("/greenhouses/{gh_id}/workers", response_model=List[UserOut])
+def get_greenhouse_workers(gh_id: str, admin: dict = Depends(require_admin)):
+    """Получение списка рабочих, привязанных к теплице. Доступ: admin."""
+    with engine.connect() as conn:
+        # Проверка существования теплицы
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        if not gh_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found"
+            )
+        
+        rows = conn.execute(
+            text(
+                """
+            SELECT u.id, u.email, u.name, u.role, u.is_active, u.avatar_id, u.created_at
+            FROM users u
+            INNER JOIN user_greenhouses ug ON u.id = ug.user_id
+            WHERE ug.greenhouse_id = :gh_id
+            AND u.role = 'worker'
+            ORDER BY u.created_at DESC
+        """
+            ),
+            {"gh_id": gh_id},
+        ).mappings().all()
+        
+        result = []
+        for r in rows:
+            user_data = enrich_user_with_avatar_url(dict(r), conn)
+            result.append(UserOut(**user_data))
+        
+        return result
+
+
 # --- Plant types ---
 @router.get("/plant-types", response_model=List[PlantTypeOut])
 def list_plant_types(current_user: dict = Depends(get_current_user)):
