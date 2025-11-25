@@ -1257,6 +1257,10 @@ def get_next_watering_plants(gh_id: str, current_user: dict = Depends(get_curren
                     is_overdue = False
             elif next_date:
                 # Вычисляем дни до следующего полива
+                # next_date = last_watering + interval_days
+                # days_until = next_date - now
+                # Пример: полили вчера, интервал 3 дня -> next_date = послезавтра -> days_until = 2
+                # Если days_until = 0, полив сегодня - на фронте должна отображаться кнопка "Полить"
                 if isinstance(next_date, str):
                     next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
                 if isinstance(next_date, datetime):
@@ -1695,6 +1699,11 @@ async def create_watering_event(payload: WaterEventCreate, current_user: dict = 
             .mappings()
             .first()
         )
+
+    # Пересчитываем дни до следующего полива для этой теплицы (как в 00:01)
+    if payload.type == "watering":
+        recalculate_watering_days_for_greenhouse(payload.greenhouse_id)
+        logger.info("Пересчитаны дни до следующего полива для теплицы %s", payload.greenhouse_id)
 
     # Отправляем обновление через WebSocket для всех подписанных клиентов
     update_message = {
@@ -2394,12 +2403,107 @@ def mark_greenhouse_alerts_as_read(
 
 
 # --- Watering Check (Background Task) ---
+def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
+    """
+    Пересчитывает дни до следующего полива для всех растений в теплице.
+    Вызывается после полива или ежедневно в 00:01.
+    """
+    with engine.begin() as conn:
+        # Получаем все растения в теплице с их последними поливами
+        plants = conn.execute(
+            text(
+                """
+                SELECT 
+                    pi.id as plant_instance_id,
+                    pt.watering_interval_days,
+                    MAX(we.created_at) as last_watering
+                FROM plant_instances pi
+                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
+                LEFT JOIN watering_events we ON we.plant_instance_id = pi.id 
+                    AND we.type = 'watering'
+                WHERE pi.greenhouse_id = :gh_id
+                    AND pt.watering_interval_days IS NOT NULL
+                GROUP BY pi.id, pt.watering_interval_days
+            """
+            ),
+            {"gh_id": greenhouse_id},
+        ).mappings().all()
+        
+        now = datetime.now()
+        
+        for plant in plants:
+            if plant["last_watering"]:
+                # Вычисляем дни до следующего полива
+                last_date = plant["last_watering"]
+                if isinstance(last_date, str):
+                    last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
+                if isinstance(last_date, datetime):
+                    last_date = last_date.replace(tzinfo=None)
+                    days_passed = (now - last_date).days
+                    days_until = plant["watering_interval_days"] - days_passed
+                    
+                    # Если полив просрочен или сегодня, проверяем наличие alert
+                    if days_until <= 0:
+                        # Проверяем, есть ли уже alert
+                        existing_alert = conn.execute(
+                            text(
+                                """
+                                SELECT id FROM alerts
+                                WHERE greenhouse_id = :gh_id
+                                AND type = 'watering_overdue'
+                                AND is_read = 0
+                                LIMIT 1
+                            """
+                            ),
+                            {"gh_id": greenhouse_id},
+                        ).mappings().first()
+                        
+                        if not existing_alert:
+                            alert_id = new_id()
+                            days_overdue = abs(days_until) if days_until < 0 else 0
+                            message = f"Требуется полив"
+                            if days_overdue > 0:
+                                message += f" (просрочено на {days_overdue} дней)"
+                            
+                            conn.execute(
+                                text(
+                                    """
+                                    INSERT INTO alerts (id, greenhouse_id, type, message, severity)
+                                    VALUES (:id, :gh_id, 'watering_overdue', :msg, 'warning')
+                                """
+                                ),
+                                {
+                                    "id": alert_id,
+                                    "gh_id": greenhouse_id,
+                                    "msg": message,
+                                },
+                            )
+
+
 def check_watering_schedules():
     """
     Проверка теплиц, где подошло время полива.
+    Каждый день в 00:01 пересчитывает дни до следующего полива для всех теплиц.
     Если срок истёк — создаётся запись в alerts и отправляется push-уведомление.
     """
     with engine.begin() as conn:
+        # Получаем все теплицы с растениями для пересчета
+        greenhouses = conn.execute(
+            text(
+                """
+                SELECT DISTINCT g.id as greenhouse_id
+                FROM greenhouses g
+                INNER JOIN plant_instances pi ON g.id = pi.greenhouse_id
+                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
+                WHERE pt.watering_interval_days IS NOT NULL
+            """
+            )
+        ).mappings().all()
+        
+        # Пересчитываем дни до следующего полива для каждой теплицы
+        for gh in greenhouses:
+            recalculate_watering_days_for_greenhouse(gh["greenhouse_id"])
+        
         overdue_plants = conn.execute(
             text(
                 """
