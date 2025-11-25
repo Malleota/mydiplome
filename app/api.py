@@ -380,16 +380,29 @@ def list_greenhouses(current_user: dict = Depends(get_current_user)):
             rows = conn.execute(text(sql)).mappings().all()
         else:
             # Рабочий видит только те теплицы, к которым он привязан
+            # Используем строгую проверку через EXISTS для гарантии правильной фильтрации
             sql = """
-                SELECT g.id, g.name, g.description, g.image_url, g.sensor_id,
+                SELECT DISTINCT g.id, g.name, g.description, g.image_url, g.sensor_id,
                        g.target_temp_min, g.target_temp_max,
                        g.target_hum_min, g.target_hum_max, g.created_at
                 FROM greenhouses g
-                INNER JOIN user_greenhouses ug ON g.id = ug.greenhouse_id
-                WHERE ug.user_id = :user_id
+                WHERE EXISTS (
+                    SELECT 1 
+                    FROM user_greenhouses ug
+                    WHERE ug.greenhouse_id = g.id
+                    AND ug.user_id = :user_id
+                )
                 ORDER BY g.created_at ASC
             """
             rows = conn.execute(text(sql), {"user_id": current_user["id"]}).mappings().all()
+            
+            # Логируем для отладки
+            logger.info(
+                "Рабочий %s (role: %s) запросил список теплиц. Найдено: %d",
+                current_user["id"],
+                current_user["role"],
+                len(rows)
+            )
 
         result = []
         for r in rows:
