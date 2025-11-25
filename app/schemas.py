@@ -124,6 +124,8 @@ class PlantInstanceUpdate(BaseModel):
     plant_type_id: Optional[str] = None
     quantity: Optional[int] = Field(None, ge=1)
     note: Optional[str] = None
+    next_watering_date: Optional[datetime] = None
+    days_until: Optional[int] = None
 
 
 class BindSensorIn(BaseModel):

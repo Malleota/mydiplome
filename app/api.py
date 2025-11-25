@@ -1181,6 +1181,14 @@ def update_plant_instance(
             update_fields.append("note = :note")
             params["note"] = payload.note
         
+        if payload.next_watering_date is not None:
+            update_fields.append("next_watering_date = :next_date")
+            params["next_date"] = payload.next_watering_date
+        
+        if payload.days_until is not None:
+            update_fields.append("days_until = :days")
+            params["days"] = payload.days_until
+        
         if not update_fields:
             # Если ничего не передано для обновления, просто возвращаем текущее состояние
             row = conn.execute(
