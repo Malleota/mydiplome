@@ -379,13 +379,21 @@ def list_greenhouses(current_user: dict = Depends(get_current_user)):
             """
             rows = conn.execute(text(sql)).mappings().all()
         else:
+            # Рабочий видит только те теплицы, к которым он привязан И где есть хотя бы один активный рабочий
             sql = """
-                SELECT g.id, g.name, g.description, g.image_url, g.sensor_id,
+                SELECT DISTINCT g.id, g.name, g.description, g.image_url, g.sensor_id,
                        g.target_temp_min, g.target_temp_max,
                        g.target_hum_min, g.target_hum_max, g.created_at
                 FROM greenhouses g
                 INNER JOIN user_greenhouses ug ON g.id = ug.greenhouse_id
                 WHERE ug.user_id = :user_id
+                AND EXISTS (
+                    SELECT 1 FROM user_greenhouses ug2
+                    INNER JOIN users u2 ON ug2.user_id = u2.id
+                    WHERE ug2.greenhouse_id = g.id
+                    AND u2.role = 'worker'
+                    AND u2.is_active = 1
+                )
                 ORDER BY g.created_at ASC
             """
             rows = conn.execute(text(sql), {"user_id": current_user["id"]}).mappings().all()
