@@ -45,6 +45,7 @@ from .schemas import (
     PlantInstanceUpdate,
     PlantTypeCreate,
     PlantTypeOut,
+    PlantTypeUpdate,
     ReportOut,
     SensorDataIn,
     SensorReadingOut,
@@ -909,6 +910,109 @@ def delete_plant_type(pt_id: str, admin: dict = Depends(require_admin)):
         if deleted == 0:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plant type not found")
     logger.info("Тип растения %s удален из справочника", pt_id)
+
+
+@router.patch("/plant-types/{pt_id}", response_model=PlantTypeOut)
+def update_plant_type(
+    pt_id: str,
+    payload: PlantTypeUpdate,
+    admin: dict = Depends(require_admin)
+):
+    """Обновление типа растения в справочнике. Доступ: admin."""
+    with engine.begin() as conn:
+        # Проверяем существование типа растения
+        pt = conn.execute(
+            text("SELECT id FROM plant_types WHERE id=:id"),
+            {"id": pt_id},
+        ).scalar()
+        if not pt:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Plant type not found",
+            )
+        
+        # Формируем запрос UPDATE только для переданных полей
+        update_fields = []
+        params = {"pt_id": pt_id}
+        
+        if payload.name is not None:
+            update_fields.append("name = :name")
+            params["name"] = payload.name
+        
+        if payload.description is not None:
+            update_fields.append("description = :description")
+            params["description"] = payload.description
+        
+        if payload.image_url is not None:
+            update_fields.append("image_url = :img_url")
+            params["img_url"] = payload.image_url
+        
+        if payload.temp_min is not None:
+            update_fields.append("temp_min = :tmin")
+            params["tmin"] = payload.temp_min
+        
+        if payload.temp_max is not None:
+            update_fields.append("temp_max = :tmax")
+            params["tmax"] = payload.temp_max
+        
+        if payload.humidity_min is not None:
+            update_fields.append("humidity_min = :hmin")
+            params["hmin"] = payload.humidity_min
+        
+        if payload.humidity_max is not None:
+            update_fields.append("humidity_max = :hmax")
+            params["hmax"] = payload.humidity_max
+        
+        if payload.watering_interval_days is not None:
+            update_fields.append("watering_interval_days = :wi")
+            params["wi"] = payload.watering_interval_days
+        
+        if payload.fertilizing_interval_days is not None:
+            update_fields.append("fertilizing_interval_days = :fi")
+            params["fi"] = payload.fertilizing_interval_days
+        
+        if not update_fields:
+            # Если ничего не передано для обновления, просто возвращаем текущее состояние
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, name, description, image_url, temp_min, temp_max,
+                           humidity_min, humidity_max, watering_interval_days, fertilizing_interval_days
+                    FROM plant_types WHERE id=:id
+                """
+                ),
+                {"id": pt_id},
+            ).mappings().first()
+            plant_data = dict(row)
+            plant_data["image_url"] = get_full_static_url(plant_data["image_url"])
+            return PlantTypeOut(**plant_data)
+        
+        # Выполняем обновление
+        update_sql = f"""
+            UPDATE plant_types
+            SET {', '.join(update_fields)}
+            WHERE id=:pt_id
+        """
+        conn.execute(text(update_sql), params)
+        
+        # Получаем обновленные данные
+        row = conn.execute(
+            text(
+                """
+                SELECT id, name, description, image_url, temp_min, temp_max,
+                       humidity_min, humidity_max, watering_interval_days, fertilizing_interval_days
+                FROM plant_types WHERE id=:id
+            """
+            ),
+            {"id": pt_id},
+        ).mappings().first()
+        
+        # Формируем полный URL для изображения
+        plant_data = dict(row)
+        plant_data["image_url"] = get_full_static_url(plant_data["image_url"])
+    
+    logger.info("Тип растения %s обновлен в справочнике", pt_id)
+    return PlantTypeOut(**plant_data)
 
 
 # --- Plant instances in greenhouse ---

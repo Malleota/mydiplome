@@ -94,6 +94,18 @@ class PlantTypeOut(BaseModel):
     fertilizing_interval_days: Optional[int] = None
 
 
+class PlantTypeUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    temp_min: Optional[float] = None
+    temp_max: Optional[float] = None
+    humidity_min: Optional[float] = None
+    humidity_max: Optional[float] = None
+    watering_interval_days: Optional[int] = None
+    fertilizing_interval_days: Optional[int] = None
+
+
 class PlantInstanceCreate(BaseModel):
     plant_type_id: str
     quantity: int = Field(1, ge=1)
