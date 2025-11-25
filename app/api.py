@@ -274,6 +274,28 @@ def list_avatars():
 
 
 # --- Users (Admin only) ---
+@router.get("/users", response_model=List[UserOut])
+def list_users(admin: dict = Depends(require_admin)):
+    """Получение списка всех пользователей. Доступ: admin."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+            SELECT id, email, name, role, is_active, avatar_id, created_at
+            FROM users
+            ORDER BY created_at DESC
+        """
+            )
+        ).mappings().all()
+        
+        result = []
+        for r in rows:
+            user_data = enrich_user_with_avatar_url(dict(r), conn)
+            result.append(UserOut(**user_data))
+        
+        return result
+
+
 @router.patch("/users/{user_id}/role", response_model=UserOut)
 def update_user_role(
     user_id: str, payload: UserRoleUpdate, admin: dict = Depends(require_admin)
