@@ -2445,6 +2445,11 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
         today = now.date()
         
         for plant in plants:
+            plant_instance_id = plant["plant_instance_id"]
+            interval_days = plant["watering_interval_days"]
+            next_watering_date = None
+            days_until = None
+            
             if plant["last_watering"]:
                 # Вычисляем дни до следующего полива на основе дат (без учета времени)
                 # days_passed = (сегодня - дата_последнего_полива) в днях
@@ -2456,7 +2461,10 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                     last_date = last_date.replace(tzinfo=None)
                     last_watering_date = last_date.date()
                     days_passed = (today - last_watering_date).days
-                    days_until = plant["watering_interval_days"] - days_passed
+                    days_until = interval_days - days_passed
+                    
+                    # Вычисляем дату следующего полива
+                    next_watering_date = last_date + timedelta(days=interval_days)
                     
                     # Если полив просрочен или сегодня, проверяем наличие alert
                     if days_until <= 0:
@@ -2494,6 +2502,27 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                                     "msg": message,
                                 },
                             )
+            else:
+                # Если полива не было, следующий полив - через интервал от текущей даты
+                if interval_days:
+                    next_watering_date = now + timedelta(days=interval_days)
+                    days_until = interval_days
+            
+            # Обновляем поля next_watering_date и days_until в таблице plant_instances
+            conn.execute(
+                text(
+                    """
+                    UPDATE plant_instances
+                    SET next_watering_date = :next_date, days_until = :days
+                    WHERE id = :plant_id
+                """
+                ),
+                {
+                    "next_date": next_watering_date,
+                    "days": days_until,
+                    "plant_id": plant_instance_id,
+                },
+            )
 
 
 def check_watering_schedules():

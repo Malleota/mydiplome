@@ -106,6 +106,8 @@ def get_schema_statements():
             plant_type_id  TEXT NOT NULL,
             quantity       INTEGER NOT NULL DEFAULT 1,
             note           TEXT,
+            next_watering_date DATETIME,
+            days_until     INTEGER,
             CONSTRAINT fk_pi_greenhouse
                 FOREIGN KEY (greenhouse_id) REFERENCES greenhouses(id)
                 ON DELETE CASCADE,
@@ -268,6 +270,26 @@ def ensure_schema(engine: Engine, db_path: str = None):
                     {"id": image_id, "url": image_url, "name": name}
                 )
             logger.info(f"Добавлено {len(images)} базовых изображений теплиц")
+    
+    # Миграция: добавляем поля next_watering_date и days_until в plant_instances, если их нет
+    with engine.begin() as conn:
+        # Проверяем существование колонок через PRAGMA table_info
+        table_info = conn.execute(text("PRAGMA table_info(plant_instances)")).fetchall()
+        column_names = [row[1] for row in table_info]  # Второй элемент - имя колонки
+        
+        if "next_watering_date" not in column_names:
+            try:
+                conn.execute(text("ALTER TABLE plant_instances ADD COLUMN next_watering_date DATETIME"))
+                logger.info("Добавлена колонка next_watering_date в таблицу plant_instances")
+            except OperationalError as e:
+                logger.warning(f"Не удалось добавить колонку next_watering_date: {e}")
+        
+        if "days_until" not in column_names:
+            try:
+                conn.execute(text("ALTER TABLE plant_instances ADD COLUMN days_until INTEGER"))
+                logger.info("Добавлена колонка days_until в таблицу plant_instances")
+            except OperationalError as e:
+                logger.warning(f"Не удалось добавить колонку days_until: {e}")
     
     logger.info("Схема базы данных успешно инициализирована")
 
