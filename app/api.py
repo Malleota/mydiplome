@@ -39,6 +39,7 @@ from .schemas import (
     GreenhouseCreate,
     GreenhouseImageOut,
     GreenhouseOut,
+    GreenhouseUpdate,
     NextWateringOut,
     PlantInstanceCreate,
     PlantInstanceOut,
@@ -705,6 +706,122 @@ def get_greenhouse(gh_id: str, current_user: dict = Depends(get_current_user)):
         gh_data["image_url"] = get_full_static_url(gh_data["image_url"])
         
         return GreenhouseOut(**gh_data)
+
+
+@router.patch("/greenhouses/{gh_id}", response_model=GreenhouseOut)
+def update_greenhouse(
+    gh_id: str,
+    payload: GreenhouseUpdate,
+    admin: dict = Depends(require_admin)
+):
+    """Обновление теплицы. Доступ: admin."""
+    with engine.begin() as conn:
+        # Проверяем существование теплицы
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        if not gh_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Greenhouse not found",
+            )
+        
+        # Проверяем, что выбранное изображение существует (если указано)
+        if payload.image_url is not None:
+            image_exists = conn.execute(
+                text("SELECT 1 FROM greenhouse_images WHERE image_url=:url"),
+                {"url": payload.image_url},
+            ).scalar()
+            if not image_exists:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Выбранное изображение не найдено в списке доступных",
+                )
+        
+        # Формируем запрос UPDATE только для переданных полей
+        update_fields = []
+        params = {"gh_id": gh_id}
+        
+        if payload.name is not None:
+            update_fields.append("name = :name")
+            params["name"] = payload.name
+        
+        if payload.description is not None:
+            update_fields.append("description = :description")
+            params["description"] = payload.description
+        
+        if payload.image_url is not None:
+            update_fields.append("image_url = :img_url")
+            params["img_url"] = payload.image_url
+        
+        if payload.target_temp_min is not None:
+            update_fields.append("target_temp_min = :tmin")
+            params["tmin"] = payload.target_temp_min
+        
+        if payload.target_temp_max is not None:
+            update_fields.append("target_temp_max = :tmax")
+            params["tmax"] = payload.target_temp_max
+        
+        if payload.target_hum_min is not None:
+            update_fields.append("target_hum_min = :hmin")
+            params["hmin"] = payload.target_hum_min
+        
+        if payload.target_hum_max is not None:
+            update_fields.append("target_hum_max = :hmax")
+            params["hmax"] = payload.target_hum_max
+        
+        if not update_fields:
+            # Если ничего не передано для обновления, просто возвращаем текущее состояние
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT id, name, description, image_url, sensor_id,
+                               target_temp_min, target_temp_max,
+                               target_hum_min, target_hum_max, created_at
+                        FROM greenhouses WHERE id=:id
+                    """
+                    ),
+                    {"id": gh_id},
+                )
+                .mappings()
+                .first()
+            )
+            gh_data = dict(row)
+            gh_data["image_url"] = get_full_static_url(gh_data["image_url"])
+            return GreenhouseOut(**gh_data)
+        
+        # Выполняем обновление
+        update_sql = f"""
+            UPDATE greenhouses
+            SET {', '.join(update_fields)}
+            WHERE id=:gh_id
+        """
+        conn.execute(text(update_sql), params)
+        
+        # Получаем обновленные данные
+        row = (
+            conn.execute(
+                text(
+                    """
+                    SELECT id, name, description, image_url, sensor_id,
+                           target_temp_min, target_temp_max,
+                           target_hum_min, target_hum_max, created_at
+                    FROM greenhouses WHERE id=:id
+                """
+                ),
+                {"id": gh_id},
+            )
+            .mappings()
+            .first()
+        )
+        
+        # Формируем полный URL для изображения
+        gh_data = dict(row)
+        gh_data["image_url"] = get_full_static_url(gh_data["image_url"])
+    
+    logger.info("Теплица %s обновлена администратором %s", gh_id, admin["id"])
+    return GreenhouseOut(**gh_data)
 
 
 @router.delete("/greenhouses/{gh_id}", status_code=204)

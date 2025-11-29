@@ -69,6 +69,16 @@ class GreenhouseOut(BaseModel):
     created_at: datetime
 
 
+class GreenhouseUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    target_temp_min: Optional[float] = None
+    target_temp_max: Optional[float] = None
+    target_hum_min: Optional[float] = None
+    target_hum_max: Optional[float] = None
+
+
 class PlantTypeCreate(BaseModel):
     name: str
     description: Optional[str] = None
