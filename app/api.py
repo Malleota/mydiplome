@@ -1063,8 +1063,8 @@ def unbind_worker(gh_id: str, user_id: str, admin: dict = Depends(require_admin)
 
 
 @router.get("/greenhouses/{gh_id}/workers", response_model=List[UserOut])
-def get_greenhouse_workers(gh_id: str, admin: dict = Depends(require_admin)):
-    """Получение списка рабочих, привязанных к теплице. Доступ: admin."""
+def get_greenhouse_workers(gh_id: str, current_user: dict = Depends(get_current_user)):
+    """Получение списка рабочих, привязанных к теплице. Доступ: admin или рабочий (для своих теплиц)."""
     with engine.connect() as conn:
         # Проверка существования теплицы
         gh_exists = conn.execute(
@@ -1074,6 +1074,23 @@ def get_greenhouse_workers(gh_id: str, admin: dict = Depends(require_admin)):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found"
             )
+        
+        # Если пользователь - рабочий, проверяем доступ к теплице
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                    SELECT 1 FROM user_greenhouses
+                    WHERE user_id=:user_id AND greenhouse_id=:gh_id
+                """
+                ),
+                {"user_id": current_user["id"], "gh_id": gh_id},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
         
         rows = conn.execute(
             text(
@@ -1087,6 +1104,29 @@ def get_greenhouse_workers(gh_id: str, admin: dict = Depends(require_admin)):
         """
             ),
             {"gh_id": gh_id},
+        ).mappings().all()
+        
+        result = []
+        for r in rows:
+            user_data = enrich_user_with_avatar_url(dict(r), conn)
+            result.append(UserOut(**user_data))
+        
+        return result
+
+
+@router.get("/workers", response_model=List[UserOut])
+def list_workers(current_user: dict = Depends(get_current_user)):
+    """Получение списка всех рабочих. Доступ: admin или рабочий."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+            SELECT id, email, name, role, is_active, avatar_id, created_at
+            FROM users
+            WHERE role = 'worker'
+            ORDER BY created_at DESC
+        """
+            )
         ).mappings().all()
         
         result = []
