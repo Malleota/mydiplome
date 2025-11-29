@@ -770,7 +770,14 @@ def update_greenhouse(
             update_fields.append("target_hum_max = :hmax")
             params["hmax"] = payload.target_hum_max
         
-        if not update_fields:
+        # Проверяем, есть ли что-то для обновления (основные поля, работники или растения)
+        has_updates = (
+            len(update_fields) > 0
+            or payload.worker_ids is not None
+            or payload.plants is not None
+        )
+        
+        if not has_updates:
             # Если ничего не передано для обновления, просто возвращаем текущее состояние
             row = (
                 conn.execute(
@@ -791,13 +798,126 @@ def update_greenhouse(
             gh_data["image_url"] = get_full_static_url(gh_data["image_url"])
             return GreenhouseOut(**gh_data)
         
-        # Выполняем обновление
-        update_sql = f"""
-            UPDATE greenhouses
-            SET {', '.join(update_fields)}
-            WHERE id=:gh_id
-        """
-        conn.execute(text(update_sql), params)
+        # Выполняем обновление основных полей
+        if update_fields:
+            update_sql = f"""
+                UPDATE greenhouses
+                SET {', '.join(update_fields)}
+                WHERE id=:gh_id
+            """
+            conn.execute(text(update_sql), params)
+        
+        # Обновляем работников, если передан список
+        if payload.worker_ids is not None:
+            # Удаляем всех старых работников
+            conn.execute(
+                text("DELETE FROM user_greenhouses WHERE greenhouse_id=:gh_id"),
+                {"gh_id": gh_id},
+            )
+            # Добавляем новых работников
+            for worker_id in payload.worker_ids:
+                # Проверяем, что пользователь существует и является рабочим
+                user = conn.execute(
+                    text("SELECT role FROM users WHERE id=:id"),
+                    {"id": worker_id},
+                ).mappings().first()
+                if not user:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Пользователь {worker_id} не найден",
+                    )
+                if user["role"] != "worker":
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Пользователь {worker_id} должен быть рабочим",
+                    )
+                
+                # Привязываем рабочего
+                try:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO user_greenhouses (user_id, greenhouse_id)
+                            VALUES (:user_id, :gh_id)
+                        """
+                        ),
+                        {"user_id": worker_id, "gh_id": gh_id},
+                    )
+                except Exception:
+                    pass  # Уже привязан (не должно произойти, так как мы удалили всех)
+        
+        # Добавляем новые растения, если передан список
+        if payload.plants is not None:
+            for plant in payload.plants:
+                # Проверяем, что тип растения существует и получаем интервалы
+                pt_data = conn.execute(
+                    text("SELECT watering_interval_days, fertilizing_interval_days FROM plant_types WHERE id=:id"),
+                    {"id": plant.plant_type_id},
+                ).mappings().first()
+                if not pt_data:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Тип растения {plant.plant_type_id} не найден",
+                    )
+                
+                pi_id = new_id()
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO plant_instances (id, greenhouse_id, plant_type_id, quantity, note)
+                        VALUES (:id, :gh, :pt, :q, :note)
+                    """
+                    ),
+                    {
+                        "id": pi_id,
+                        "gh": gh_id,
+                        "pt": plant.plant_type_id,
+                        "q": plant.quantity,
+                        "note": plant.note,
+                    },
+                )
+                
+                # Если у растения есть интервал полива, создаем событие полива на сегодня
+                if pt_data["watering_interval_days"] is not None:
+                    watering_event_id = new_id()
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO watering_events
+                              (id, greenhouse_id, user_id, plant_instance_id, type, comment)
+                            VALUES
+                              (:id, :gh, :uid, :pid, 'watering', :comment)
+                        """
+                        ),
+                        {
+                            "id": watering_event_id,
+                            "gh": gh_id,
+                            "uid": admin["id"],
+                            "pid": pi_id,
+                            "comment": "Автоматически при добавлении растения",
+                        },
+                    )
+                
+                # Если у растения есть интервал удобрения, создаем событие удобрения на сегодня
+                if pt_data["fertilizing_interval_days"] is not None:
+                    fertilizing_event_id = new_id()
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO watering_events
+                              (id, greenhouse_id, user_id, plant_instance_id, type, comment)
+                            VALUES
+                              (:id, :gh, :uid, :pid, 'fertilizing', :comment)
+                        """
+                        ),
+                        {
+                            "id": fertilizing_event_id,
+                            "gh": gh_id,
+                            "uid": admin["id"],
+                            "pid": pi_id,
+                            "comment": "Автоматически при добавлении растения",
+                        },
+                    )
         
         # Получаем обновленные данные
         row = (

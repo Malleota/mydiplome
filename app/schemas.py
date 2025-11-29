@@ -77,6 +77,8 @@ class GreenhouseUpdate(BaseModel):
     target_temp_max: Optional[float] = None
     target_hum_min: Optional[float] = None
     target_hum_max: Optional[float] = None
+    plants: Optional[List[GreenhousePlantCreate]] = None
+    worker_ids: Optional[List[str]] = None
 
 
 class PlantTypeCreate(BaseModel):
