@@ -3800,44 +3800,11 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
 def check_watering_schedules():
     """
     Проверка теплиц, где подошло время полива и удобрения.
-    Каждый день в 00:01 пересчитывает дни до следующего полива и удобрения для всех теплиц.
+    Только проверяет и создает alerts/reports, НЕ изменяет данные в plant_instances.
     Если срок истёк — создаётся запись в alerts и отправляется push-уведомление.
     """
     with engine.begin() as conn:
-        # Получаем все теплицы с растениями для пересчета полива
-        greenhouses_watering = conn.execute(
-            text(
-                """
-                SELECT DISTINCT g.id as greenhouse_id
-                FROM greenhouses g
-                INNER JOIN plant_instances pi ON g.id = pi.greenhouse_id
-                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
-                WHERE pt.watering_interval_days IS NOT NULL
-            """
-            )
-        ).mappings().all()
-        
-        # Пересчитываем дни до следующего полива для каждой теплицы
-        for gh in greenhouses_watering:
-            recalculate_watering_days_for_greenhouse(gh["greenhouse_id"])
-        
-        # Получаем все теплицы с растениями для пересчета удобрений
-        greenhouses_fertilizing = conn.execute(
-            text(
-                """
-                SELECT DISTINCT g.id as greenhouse_id
-                FROM greenhouses g
-                INNER JOIN plant_instances pi ON g.id = pi.greenhouse_id
-                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
-                WHERE pt.fertilizing_interval_days IS NOT NULL
-            """
-            )
-        ).mappings().all()
-        
-        # Пересчитываем дни до следующего удобрения для каждой теплицы
-        for gh in greenhouses_fertilizing:
-            recalculate_fertilizing_days_for_greenhouse(gh["greenhouse_id"])
-        
+        # Получаем просроченные растения для полива
         overdue_plants = conn.execute(
             text(
                 """
