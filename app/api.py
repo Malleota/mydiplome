@@ -2617,54 +2617,73 @@ async def websocket_sensor_data_all(websocket: WebSocket, token: Optional[str] =
     Параметры:
     - token (query parameter): JWT токен для аутентификации (обязательно)
     """
-    # Проверка аутентификации
-    user = None
-    if token:
-        try:
-            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-            user_id = payload.get("sub")
-            if user_id:
-                with engine.connect() as conn:
-                    user = conn.execute(
-                        text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
-                        {"id": user_id},
-                    ).mappings().first()
-        except Exception as e:
-            logger.warning("Ошибка проверки токена WebSocket: %s", e)
-    
-    if not user:
-        await websocket.close(code=1008)
-        return
-    
-    # Только админы могут подписаться на все теплицы
-    if user["role"] != "admin":
-        await websocket.close(code=1008)
-        return
-    
-    # Подключаем клиента (без конкретной теплицы - все теплицы)
-    await manager.connect(websocket, None)
-    
     try:
-        # Отправляем подтверждение подключения
-        await websocket.send_json({
-            "type": "connected",
-            "greenhouse_id": None,
-            "message": "Подключено к обновлениям данных с датчиков для всех теплиц"
-        })
-        
-        # Ожидаем сообщения от клиента (можно использовать для heartbeat)
-        while True:
+        # Проверка аутентификации
+        user = None
+        if token:
             try:
-                data = await websocket.receive_text()
-                # Обработка heartbeat или других сообщений от клиента
-                if data == "ping":
-                    await websocket.send_json({"type": "pong"})
-            except WebSocketDisconnect:
-                break
-    except WebSocketDisconnect:
-        pass
-    finally:
-        manager.disconnect(websocket, None)
+                payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+                user_id = payload.get("sub")
+                if user_id:
+                    with engine.connect() as conn:
+                        user = conn.execute(
+                            text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
+                            {"id": user_id},
+                        ).mappings().first()
+            except Exception as e:
+                logger.warning("Ошибка проверки токена WebSocket: %s", e)
+        
+        if not user:
+            try:
+                await websocket.close(code=1008)
+            except:
+                pass
+            return
+        
+        # Только админы могут подписаться на все теплицы
+        if user["role"] != "admin":
+            try:
+                await websocket.close(code=1008)
+            except:
+                pass
+            return
+        
+        # Подключаем клиента (без конкретной теплицы - все теплицы)
+        try:
+            await manager.connect(websocket, None)
+        except Exception as e:
+            # Если это не WebSocket запрос (например, HTTP GET), просто игнорируем
+            logger.debug("Попытка подключения к WebSocket через HTTP: %s", e)
+            return
+        
+        try:
+            # Отправляем подтверждение подключения
+            await websocket.send_json({
+                "type": "connected",
+                "greenhouse_id": None,
+                "message": "Подключено к обновлениям данных с датчиков для всех теплиц"
+            })
+            
+            # Ожидаем сообщения от клиента (можно использовать для heartbeat)
+            while True:
+                try:
+                    data = await websocket.receive_text()
+                    # Обработка heartbeat или других сообщений от клиента
+                    if data == "ping":
+                        await websocket.send_json({"type": "pong"})
+                except WebSocketDisconnect:
+                    break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            manager.disconnect(websocket, None)
+    except Exception as e:
+        # Обрабатываем любые другие ошибки (например, HTTP запрос вместо WebSocket)
+        logger.debug("Ошибка WebSocket подключения: %s", e)
+        try:
+            await websocket.close(code=1008)
+        except:
+            pass
 
 
 @router.websocket("/ws/sensor-data/{greenhouse_id}")
@@ -2677,62 +2696,78 @@ async def websocket_sensor_data(websocket: WebSocket, greenhouse_id: str, token:
     - greenhouse_id: ID теплицы для подписки на обновления
     - token (query parameter): JWT токен для аутентификации (опционально, но рекомендуется)
     """
-    # Проверка аутентификации, если токен предоставлен
-    user = None
-    if token:
-        try:
-            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-            user_id = payload.get("sub")
-            if user_id:
-                with engine.connect() as conn:
-                    user = conn.execute(
-                        text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
-                        {"id": user_id},
-                    ).mappings().first()
-        except Exception as e:
-            logger.warning("Ошибка проверки токена WebSocket: %s", e)
-    
-    # Проверка доступа к теплице
-    if user:
-        with engine.connect() as conn:
-            if user["role"] == "worker":
-                has_access = conn.execute(
-                    text(
-                        """
-                        SELECT 1 FROM user_greenhouses
-                        WHERE user_id=:user_id AND greenhouse_id=:gh_id
-                    """
-                    ),
-                    {"user_id": user["id"], "gh_id": greenhouse_id},
-                ).scalar()
-                if not has_access:
-                    await websocket.close(code=1008)
-                    return
-    
-    # Подключаем клиента
-    await manager.connect(websocket, greenhouse_id)
-    
     try:
-        # Отправляем подтверждение подключения
-        await websocket.send_json({
-            "type": "connected",
-            "greenhouse_id": greenhouse_id,
-            "message": "Подключено к обновлениям данных с датчиков"
-        })
-        
-        # Ожидаем сообщения от клиента (можно использовать для heartbeat)
-        while True:
+        # Проверка аутентификации, если токен предоставлен
+        user = None
+        if token:
             try:
-                data = await websocket.receive_text()
-                # Обработка heartbeat или других сообщений от клиента
-                if data == "ping":
-                    await websocket.send_json({"type": "pong"})
-            except WebSocketDisconnect:
-                break
-    except WebSocketDisconnect:
-        pass
-    finally:
-        manager.disconnect(websocket, greenhouse_id)
+                payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+                user_id = payload.get("sub")
+                if user_id:
+                    with engine.connect() as conn:
+                        user = conn.execute(
+                            text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
+                            {"id": user_id},
+                        ).mappings().first()
+            except Exception as e:
+                logger.warning("Ошибка проверки токена WebSocket: %s", e)
+        
+        # Проверка доступа к теплице
+        if user:
+            with engine.connect() as conn:
+                if user["role"] == "worker":
+                    has_access = conn.execute(
+                        text(
+                            """
+                            SELECT 1 FROM user_greenhouses
+                            WHERE user_id=:user_id AND greenhouse_id=:gh_id
+                        """
+                        ),
+                        {"user_id": user["id"], "gh_id": greenhouse_id},
+                    ).scalar()
+                    if not has_access:
+                        try:
+                            await websocket.close(code=1008)
+                        except:
+                            pass
+                        return
+        
+        # Подключаем клиента
+        try:
+            await manager.connect(websocket, greenhouse_id)
+        except Exception as e:
+            # Если это не WebSocket запрос (например, HTTP GET), просто игнорируем
+            logger.debug("Попытка подключения к WebSocket через HTTP: %s", e)
+            return
+        
+        try:
+            # Отправляем подтверждение подключения
+            await websocket.send_json({
+                "type": "connected",
+                "greenhouse_id": greenhouse_id,
+                "message": "Подключено к обновлениям данных с датчиков"
+            })
+            
+            # Ожидаем сообщения от клиента (можно использовать для heartbeat)
+            while True:
+                try:
+                    data = await websocket.receive_text()
+                    # Обработка heartbeat или других сообщений от клиента
+                    if data == "ping":
+                        await websocket.send_json({"type": "pong"})
+                except WebSocketDisconnect:
+                    break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            manager.disconnect(websocket, greenhouse_id)
+    except Exception as e:
+        # Обрабатываем любые другие ошибки (например, HTTP запрос вместо WebSocket)
+        logger.debug("Ошибка WebSocket подключения: %s", e)
+        try:
+            await websocket.close(code=1008)
+        except:
+            pass
 
 
 # --- BLE Sensor Data ---

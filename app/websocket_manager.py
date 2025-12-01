@@ -14,7 +14,12 @@ class ConnectionManager:
     
     async def connect(self, websocket: WebSocket, greenhouse_id: Optional[str] = None):
         """Подключение клиента к WebSocket."""
-        await websocket.accept()
+        try:
+            await websocket.accept()
+        except Exception as e:
+            # Если это не WebSocket запрос, пробрасываем исключение дальше
+            logger.debug("Ошибка при принятии WebSocket подключения: %s", e)
+            raise
         
         if greenhouse_id:
             if greenhouse_id not in self.active_connections:
