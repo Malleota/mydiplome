@@ -80,6 +80,12 @@ def enrich_user_with_avatar_url(user_data: dict, conn) -> dict:
     return user_dict
 
 
+@router.get("/")
+def root():
+    """Корневой endpoint для проверки доступности API."""
+    return {"message": "API is running", "version": "0.1.0"}
+
+
 @router.get("/health")
 def health():
     with engine.connect() as conn:
