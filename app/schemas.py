@@ -243,3 +243,17 @@ class SensorReadingOut(BaseModel):
     humidity: float
     created_at: datetime
 
+
+class OverdueReportOut(BaseModel):
+    """Репорт о просрочке полива или удобрения."""
+    id: str
+    greenhouse_id: str
+    greenhouse_name: Optional[str] = None
+    plant_instance_id: Optional[str] = None
+    plant_type_id: Optional[str] = None
+    plant_name: Optional[str] = None
+    report_type: str
+    days_overdue: int
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+
