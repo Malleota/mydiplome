@@ -3609,20 +3609,39 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                     days_until = interval_days
             
             # Обновляем поля next_watering_date и days_until в таблице plant_instances
-            conn.execute(
-                text(
+            # НЕ обновляем next_watering_date если полив просрочен - оставляем текущие значения
+            # чтобы просрочка отображалась корректно
+            if days_until is not None and days_until < 0:
+                # Если полив просрочен, НЕ обновляем дату, только обновляем days_until для отображения актуальной просрочки
+                conn.execute(
+                    text(
+                        """
+                        UPDATE plant_instances
+                        SET days_until = :days
+                        WHERE id = :plant_id
                     """
-                    UPDATE plant_instances
-                    SET next_watering_date = :next_date, days_until = :days
-                    WHERE id = :plant_id
-                """
-                ),
-                {
-                    "next_date": next_watering_date,
-                    "days": days_until,
-                    "plant_id": plant_instance_id,
-                },
-            )
+                    ),
+                    {
+                        "days": days_until,
+                        "plant_id": plant_instance_id,
+                    },
+                )
+            else:
+                # Если полив не просрочен, обновляем оба поля
+                conn.execute(
+                    text(
+                        """
+                        UPDATE plant_instances
+                        SET next_watering_date = :next_date, days_until = :days
+                        WHERE id = :plant_id
+                    """
+                    ),
+                    {
+                        "next_date": next_watering_date,
+                        "days": days_until,
+                        "plant_id": plant_instance_id,
+                    },
+                )
 
 
 def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
@@ -3743,20 +3762,39 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                     fertilizing_days_until = interval_days
             
             # Обновляем поля next_fertilizing_date и fertilizing_days_until в таблице plant_instances
-            conn.execute(
-                text(
+            # НЕ обновляем next_fertilizing_date если удобрение просрочено - оставляем текущие значения
+            # чтобы просрочка отображалась корректно
+            if fertilizing_days_until is not None and fertilizing_days_until < 0:
+                # Если удобрение просрочено, НЕ обновляем дату, только обновляем fertilizing_days_until для отображения актуальной просрочки
+                conn.execute(
+                    text(
+                        """
+                        UPDATE plant_instances
+                        SET fertilizing_days_until = :days
+                        WHERE id = :plant_id
                     """
-                    UPDATE plant_instances
-                    SET next_fertilizing_date = :next_date, fertilizing_days_until = :days
-                    WHERE id = :plant_id
-                """
-                ),
-                {
-                    "next_date": next_fertilizing_date,
-                    "days": fertilizing_days_until,
-                    "plant_id": plant_instance_id,
-                },
-            )
+                    ),
+                    {
+                        "days": fertilizing_days_until,
+                        "plant_id": plant_instance_id,
+                    },
+                )
+            else:
+                # Если удобрение не просрочено, обновляем оба поля
+                conn.execute(
+                    text(
+                        """
+                        UPDATE plant_instances
+                        SET next_fertilizing_date = :next_date, fertilizing_days_until = :days
+                        WHERE id = :plant_id
+                    """
+                    ),
+                    {
+                        "next_date": next_fertilizing_date,
+                        "days": fertilizing_days_until,
+                        "plant_id": plant_instance_id,
+                    },
+                )
 
 
 def check_watering_schedules():
