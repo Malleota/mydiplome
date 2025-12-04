@@ -3849,6 +3849,30 @@ def check_watering_schedules():
                         days_overdue = max(0, days_passed - plant["watering_interval_days"])
                 except Exception:
                     days_overdue = 0
+            else:
+                # Если полива не было, вычисляем просрочку от даты создания растения
+                # или просто считаем просроченным, если прошло больше интервала
+                try:
+                    # Получаем дату создания plant_instance
+                    pi_created = conn.execute(
+                        text(
+                            """
+                            SELECT created_at FROM plant_instances
+                            WHERE id = :pi_id
+                        """
+                        ),
+                        {"pi_id": plant["plant_instance_id"]},
+                    ).scalar()
+                    
+                    if pi_created:
+                        if isinstance(pi_created, str):
+                            pi_created = datetime.fromisoformat(pi_created.replace("Z", "+00:00"))
+                        if isinstance(pi_created, datetime):
+                            days_passed = (datetime.now() - pi_created.replace(tzinfo=None)).days
+                            days_overdue = max(0, days_passed - plant["watering_interval_days"])
+                except Exception:
+                    # Если не удалось вычислить, считаем просроченным (days_overdue = 0 означает "требуется полив")
+                    days_overdue = 0
 
             message = f"Требуется полив: {plant['plant_name']}"
             if days_overdue > 0:
@@ -3866,6 +3890,25 @@ def check_watering_schedules():
             """
                 ),
                 {"gh_id": plant["greenhouse_id"]},
+            ).mappings().first()
+
+            # Проверяем, есть ли уже нерешенный репорт для этого растения и типа
+            # Это нужно делать независимо от наличия alert
+            existing_report = conn.execute(
+                text(
+                    """
+                    SELECT id FROM overdue_reports
+                    WHERE greenhouse_id = :gh_id
+                    AND plant_instance_id = :plant_instance_id
+                    AND report_type = 'watering_overdue'
+                    AND resolved_at IS NULL
+                    LIMIT 1
+                """
+                ),
+                {
+                    "gh_id": plant["greenhouse_id"],
+                    "plant_instance_id": plant["plant_instance_id"],
+                },
             ).mappings().first()
 
             if existing_alert:
@@ -3889,27 +3932,8 @@ def check_watering_schedules():
                     message,
                 )
                 
-                # Проверяем, есть ли уже репорт для этого растения и типа
-                # Если нет, создаем новый репорт (даже если days_overdue = 0, это все равно просрочка)
-                existing_report = conn.execute(
-                    text(
-                        """
-                        SELECT id FROM overdue_reports
-                        WHERE greenhouse_id = :gh_id
-                        AND plant_instance_id = :plant_instance_id
-                        AND report_type = 'watering_overdue'
-                        AND resolved_at IS NULL
-                        LIMIT 1
-                    """
-                    ),
-                    {
-                        "gh_id": plant["greenhouse_id"],
-                        "plant_instance_id": plant["plant_instance_id"],
-                    },
-                ).mappings().first()
-                
+                # Создаем репорт, если его еще нет
                 if not existing_report:
-                    # Создаем репорт, если его еще нет
                     report_id = new_id()
                     conn.execute(
                         text(
@@ -3936,6 +3960,28 @@ def check_watering_schedules():
                         plant["plant_instance_id"],
                         days_overdue,
                     )
+                else:
+                    # Обновляем существующий репорт с актуальными данными
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE overdue_reports
+                            SET days_overdue = :days_overdue,
+                                created_at = CURRENT_TIMESTAMP
+                            WHERE id = :report_id
+                        """
+                        ),
+                        {
+                            "report_id": existing_report["id"],
+                            "days_overdue": days_overdue,
+                        },
+                    )
+                    logger.info(
+                        "Обновлен репорт о просрочке полива для теплицы %s, растения %s (просрочка: %d дней)",
+                        plant["greenhouse_id"],
+                        plant["plant_instance_id"],
+                        days_overdue,
+                    )
             else:
                 # Создаем новый alert
                 alert_id = new_id()
@@ -3958,33 +4004,56 @@ def check_watering_schedules():
                     message,
                 )
                 
-                # Создаем запись в таблице репортов (даже если days_overdue = 0, это все равно просрочка)
-                report_id = new_id()
-                conn.execute(
-                    text(
+                # Создаем запись в таблице репортов только если ее еще нет
+                if not existing_report:
+                    report_id = new_id()
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO overdue_reports (
+                                id, greenhouse_id, plant_instance_id, plant_type_id,
+                                report_type, days_overdue
+                            )
+                            VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                    'watering_overdue', :days_overdue)
                         """
-                        INSERT INTO overdue_reports (
-                            id, greenhouse_id, plant_instance_id, plant_type_id,
-                            report_type, days_overdue
-                        )
-                        VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
-                                'watering_overdue', :days_overdue)
-                    """
-                    ),
-                    {
-                        "id": report_id,
-                        "gh_id": plant["greenhouse_id"],
-                        "plant_instance_id": plant["plant_instance_id"],
-                        "plant_type_id": plant["plant_type_id"],
-                        "days_overdue": days_overdue,
-                    },
-                )
-                logger.info(
-                    "Создан репорт о просрочке полива для теплицы %s, растения %s (просрочка: %d дней)",
-                    plant["greenhouse_id"],
-                    plant["plant_instance_id"],
-                    days_overdue,
-                )
+                        ),
+                        {
+                            "id": report_id,
+                            "gh_id": plant["greenhouse_id"],
+                            "plant_instance_id": plant["plant_instance_id"],
+                            "plant_type_id": plant["plant_type_id"],
+                            "days_overdue": days_overdue,
+                        },
+                    )
+                    logger.info(
+                        "Создан репорт о просрочке полива для теплицы %s, растения %s (просрочка: %d дней)",
+                        plant["greenhouse_id"],
+                        plant["plant_instance_id"],
+                        days_overdue,
+                    )
+                else:
+                    # Обновляем существующий репорт с актуальными данными
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE overdue_reports
+                            SET days_overdue = :days_overdue,
+                                created_at = CURRENT_TIMESTAMP
+                            WHERE id = :report_id
+                        """
+                        ),
+                        {
+                            "report_id": existing_report["id"],
+                            "days_overdue": days_overdue,
+                        },
+                    )
+                    logger.info(
+                        "Обновлен репорт о просрочке полива для теплицы %s, растения %s (просрочка: %d дней)",
+                        plant["greenhouse_id"],
+                        plant["plant_instance_id"],
+                        days_overdue,
+                    )
 
                 # Отправляем уведомление только при создании нового alert
                 workers = conn.execute(
@@ -4042,6 +4111,30 @@ def check_watering_schedules():
                         days_overdue = max(0, days_passed - plant["fertilizing_interval_days"])
                 except Exception:
                     days_overdue = 0
+            else:
+                # Если удобрения не было, вычисляем просрочку от даты создания растения
+                # или просто считаем просроченным, если прошло больше интервала
+                try:
+                    # Получаем дату создания plant_instance
+                    pi_created = conn.execute(
+                        text(
+                            """
+                            SELECT created_at FROM plant_instances
+                            WHERE id = :pi_id
+                        """
+                        ),
+                        {"pi_id": plant["plant_instance_id"]},
+                    ).scalar()
+                    
+                    if pi_created:
+                        if isinstance(pi_created, str):
+                            pi_created = datetime.fromisoformat(pi_created.replace("Z", "+00:00"))
+                        if isinstance(pi_created, datetime):
+                            days_passed = (datetime.now() - pi_created.replace(tzinfo=None)).days
+                            days_overdue = max(0, days_passed - plant["fertilizing_interval_days"])
+                except Exception:
+                    # Если не удалось вычислить, считаем просроченным (days_overdue = 0 означает "требуется удобрение")
+                    days_overdue = 0
 
             message = f"Требуется удобрение: {plant['plant_name']}"
             if days_overdue > 0:
@@ -4059,6 +4152,25 @@ def check_watering_schedules():
             """
                 ),
                 {"gh_id": plant["greenhouse_id"]},
+            ).mappings().first()
+
+            # Проверяем, есть ли уже нерешенный репорт для этого растения и типа
+            # Это нужно делать независимо от наличия alert
+            existing_report = conn.execute(
+                text(
+                    """
+                    SELECT id FROM overdue_reports
+                    WHERE greenhouse_id = :gh_id
+                    AND plant_instance_id = :plant_instance_id
+                    AND report_type = 'fertilizing_overdue'
+                    AND resolved_at IS NULL
+                    LIMIT 1
+                """
+                ),
+                {
+                    "gh_id": plant["greenhouse_id"],
+                    "plant_instance_id": plant["plant_instance_id"],
+                },
             ).mappings().first()
 
             if existing_alert:
@@ -4082,27 +4194,8 @@ def check_watering_schedules():
                     message,
                 )
                 
-                # Проверяем, есть ли уже репорт для этого растения и типа
-                # Если нет, создаем новый репорт (даже если days_overdue = 0, это все равно просрочка)
-                existing_report = conn.execute(
-                    text(
-                        """
-                        SELECT id FROM overdue_reports
-                        WHERE greenhouse_id = :gh_id
-                        AND plant_instance_id = :plant_instance_id
-                        AND report_type = 'fertilizing_overdue'
-                        AND resolved_at IS NULL
-                        LIMIT 1
-                    """
-                    ),
-                    {
-                        "gh_id": plant["greenhouse_id"],
-                        "plant_instance_id": plant["plant_instance_id"],
-                    },
-                ).mappings().first()
-                
+                # Создаем репорт, если его еще нет
                 if not existing_report:
-                    # Создаем репорт, если его еще нет
                     report_id = new_id()
                     conn.execute(
                         text(
@@ -4129,6 +4222,28 @@ def check_watering_schedules():
                         plant["plant_instance_id"],
                         days_overdue,
                     )
+                else:
+                    # Обновляем существующий репорт с актуальными данными
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE overdue_reports
+                            SET days_overdue = :days_overdue,
+                                created_at = CURRENT_TIMESTAMP
+                            WHERE id = :report_id
+                        """
+                        ),
+                        {
+                            "report_id": existing_report["id"],
+                            "days_overdue": days_overdue,
+                        },
+                    )
+                    logger.info(
+                        "Обновлен репорт о просрочке удобрения для теплицы %s, растения %s (просрочка: %d дней)",
+                        plant["greenhouse_id"],
+                        plant["plant_instance_id"],
+                        days_overdue,
+                    )
             else:
                 # Создаем новый alert
                 alert_id = new_id()
@@ -4151,33 +4266,56 @@ def check_watering_schedules():
                     message,
                 )
                 
-                # Создаем запись в таблице репортов (даже если days_overdue = 0, это все равно просрочка)
-                report_id = new_id()
-                conn.execute(
-                    text(
+                # Создаем запись в таблице репортов только если ее еще нет
+                if not existing_report:
+                    report_id = new_id()
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO overdue_reports (
+                                id, greenhouse_id, plant_instance_id, plant_type_id,
+                                report_type, days_overdue
+                            )
+                            VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                    'fertilizing_overdue', :days_overdue)
                         """
-                        INSERT INTO overdue_reports (
-                            id, greenhouse_id, plant_instance_id, plant_type_id,
-                            report_type, days_overdue
-                        )
-                        VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
-                                'fertilizing_overdue', :days_overdue)
-                    """
-                    ),
-                    {
-                        "id": report_id,
-                        "gh_id": plant["greenhouse_id"],
-                        "plant_instance_id": plant["plant_instance_id"],
-                        "plant_type_id": plant["plant_type_id"],
-                        "days_overdue": days_overdue,
-                    },
-                )
-                logger.info(
-                    "Создан репорт о просрочке удобрения для теплицы %s, растения %s (просрочка: %d дней)",
-                    plant["greenhouse_id"],
-                    plant["plant_instance_id"],
-                    days_overdue,
-                )
+                        ),
+                        {
+                            "id": report_id,
+                            "gh_id": plant["greenhouse_id"],
+                            "plant_instance_id": plant["plant_instance_id"],
+                            "plant_type_id": plant["plant_type_id"],
+                            "days_overdue": days_overdue,
+                        },
+                    )
+                    logger.info(
+                        "Создан репорт о просрочке удобрения для теплицы %s, растения %s (просрочка: %d дней)",
+                        plant["greenhouse_id"],
+                        plant["plant_instance_id"],
+                        days_overdue,
+                    )
+                else:
+                    # Обновляем существующий репорт с актуальными данными
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE overdue_reports
+                            SET days_overdue = :days_overdue,
+                                created_at = CURRENT_TIMESTAMP
+                            WHERE id = :report_id
+                        """
+                        ),
+                        {
+                            "report_id": existing_report["id"],
+                            "days_overdue": days_overdue,
+                        },
+                    )
+                    logger.info(
+                        "Обновлен репорт о просрочке удобрения для теплицы %s, растения %s (просрочка: %d дней)",
+                        plant["greenhouse_id"],
+                        plant["plant_instance_id"],
+                        days_overdue,
+                    )
 
                 # Отправляем уведомление только при создании нового alert
                 workers = conn.execute(
