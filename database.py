@@ -183,6 +183,27 @@ def get_schema_statements():
                 ON DELETE SET NULL
         );
         """,
+        """
+        CREATE TABLE IF NOT EXISTS overdue_reports (
+            id                TEXT NOT NULL PRIMARY KEY,
+            greenhouse_id     TEXT NOT NULL,
+            plant_instance_id TEXT,
+            plant_type_id     TEXT,
+            report_type       TEXT NOT NULL CHECK(report_type IN ('watering_overdue', 'fertilizing_overdue')),
+            days_overdue      INTEGER NOT NULL DEFAULT 0,
+            created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            resolved_at       DATETIME,
+            CONSTRAINT fk_or_greenhouse
+                FOREIGN KEY (greenhouse_id) REFERENCES greenhouses(id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_or_plant_instance
+                FOREIGN KEY (plant_instance_id) REFERENCES plant_instances(id)
+                ON DELETE SET NULL,
+            CONSTRAINT fk_or_plant_type
+                FOREIGN KEY (plant_type_id) REFERENCES plant_types(id)
+                ON DELETE SET NULL
+        );
+        """,
         # Индексы для улучшения производительности
         """
         CREATE INDEX IF NOT EXISTS idx_watering_events_created_at
@@ -219,6 +240,22 @@ def get_schema_statements():
         """
         CREATE INDEX IF NOT EXISTS idx_sensor_readings_created_at
             ON sensor_readings(created_at DESC);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_overdue_reports_created_at
+            ON overdue_reports(created_at DESC);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_overdue_reports_greenhouse_id
+            ON overdue_reports(greenhouse_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_overdue_reports_plant_instance_id
+            ON overdue_reports(plant_instance_id);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_overdue_reports_resolved_at
+            ON overdue_reports(resolved_at);
         """,
     ]
 

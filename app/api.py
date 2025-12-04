@@ -41,6 +41,7 @@ from .schemas import (
     GreenhouseOut,
     GreenhouseUpdate,
     NextWateringOut,
+    OverdueReportOut,
     PlantInstanceCreate,
     PlantInstanceOut,
     PlantInstanceUpdate,
@@ -77,6 +78,12 @@ def enrich_user_with_avatar_url(user_data: dict, conn) -> dict:
     else:
         user_dict["avatar_url"] = None
     return user_dict
+
+
+@router.get("/")
+def root():
+    """Корневой endpoint для проверки доступности API."""
+    return {"message": "API is running", "version": "0.1.0"}
 
 
 @router.get("/health")
@@ -2272,6 +2279,7 @@ async def create_watering_event(payload: WaterEventCreate, current_user: dict = 
         )
 
         # Удаляем соответствующие alerts после создания события полива/удобрения
+        # и обновляем resolved_at в репортах
         if payload.type == "watering":
             # Удаляем alerts о просрочке полива для этой теплицы
             deleted_count = conn.execute(
@@ -2291,6 +2299,46 @@ async def create_watering_event(payload: WaterEventCreate, current_user: dict = 
                     deleted_count,
                     payload.greenhouse_id,
                 )
+            
+            # Обновляем resolved_at в репортах о просрочке полива
+            if payload.plant_instance_id:
+                # Если указано конкретное растение, обновляем только его репорты
+                updated_reports = conn.execute(
+                    text(
+                        """
+                        UPDATE overdue_reports
+                        SET resolved_at = CURRENT_TIMESTAMP
+                        WHERE greenhouse_id = :gh_id
+                        AND plant_instance_id = :plant_instance_id
+                        AND report_type = 'watering_overdue'
+                        AND resolved_at IS NULL
+                    """
+                    ),
+                    {
+                        "gh_id": payload.greenhouse_id,
+                        "plant_instance_id": payload.plant_instance_id,
+                    },
+                ).rowcount
+            else:
+                # Если растение не указано, обновляем все репорты для теплицы
+                updated_reports = conn.execute(
+                    text(
+                        """
+                        UPDATE overdue_reports
+                        SET resolved_at = CURRENT_TIMESTAMP
+                        WHERE greenhouse_id = :gh_id
+                        AND report_type = 'watering_overdue'
+                        AND resolved_at IS NULL
+                    """
+                    ),
+                    {"gh_id": payload.greenhouse_id},
+                ).rowcount
+            if updated_reports > 0:
+                logger.info(
+                    "Обновлено %d репорт(ов) о просрочке полива для теплицы %s",
+                    updated_reports,
+                    payload.greenhouse_id,
+                )
         elif payload.type == "fertilizing":
             # Удаляем alerts о просрочке удобрения для этой теплицы
             deleted_count = conn.execute(
@@ -2308,6 +2356,46 @@ async def create_watering_event(payload: WaterEventCreate, current_user: dict = 
                 logger.info(
                     "Удалено %d alert(s) о просрочке удобрения для теплицы %s после создания события удобрения",
                     deleted_count,
+                    payload.greenhouse_id,
+                )
+            
+            # Обновляем resolved_at в репортах о просрочке удобрения
+            if payload.plant_instance_id:
+                # Если указано конкретное растение, обновляем только его репорты
+                updated_reports = conn.execute(
+                    text(
+                        """
+                        UPDATE overdue_reports
+                        SET resolved_at = CURRENT_TIMESTAMP
+                        WHERE greenhouse_id = :gh_id
+                        AND plant_instance_id = :plant_instance_id
+                        AND report_type = 'fertilizing_overdue'
+                        AND resolved_at IS NULL
+                    """
+                    ),
+                    {
+                        "gh_id": payload.greenhouse_id,
+                        "plant_instance_id": payload.plant_instance_id,
+                    },
+                ).rowcount
+            else:
+                # Если растение не указано, обновляем все репорты для теплицы
+                updated_reports = conn.execute(
+                    text(
+                        """
+                        UPDATE overdue_reports
+                        SET resolved_at = CURRENT_TIMESTAMP
+                        WHERE greenhouse_id = :gh_id
+                        AND report_type = 'fertilizing_overdue'
+                        AND resolved_at IS NULL
+                    """
+                    ),
+                    {"gh_id": payload.greenhouse_id},
+                ).rowcount
+            if updated_reports > 0:
+                logger.info(
+                    "Обновлено %d репорт(ов) о просрочке удобрения для теплицы %s",
+                    updated_reports,
                     payload.greenhouse_id,
                 )
 
@@ -2535,54 +2623,73 @@ async def websocket_sensor_data_all(websocket: WebSocket, token: Optional[str] =
     Параметры:
     - token (query parameter): JWT токен для аутентификации (обязательно)
     """
-    # Проверка аутентификации
-    user = None
-    if token:
-        try:
-            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-            user_id = payload.get("sub")
-            if user_id:
-                with engine.connect() as conn:
-                    user = conn.execute(
-                        text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
-                        {"id": user_id},
-                    ).mappings().first()
-        except Exception as e:
-            logger.warning("Ошибка проверки токена WebSocket: %s", e)
-    
-    if not user:
-        await websocket.close(code=1008)
-        return
-    
-    # Только админы могут подписаться на все теплицы
-    if user["role"] != "admin":
-        await websocket.close(code=1008)
-        return
-    
-    # Подключаем клиента (без конкретной теплицы - все теплицы)
-    await manager.connect(websocket, None)
-    
     try:
-        # Отправляем подтверждение подключения
-        await websocket.send_json({
-            "type": "connected",
-            "greenhouse_id": None,
-            "message": "Подключено к обновлениям данных с датчиков для всех теплиц"
-        })
-        
-        # Ожидаем сообщения от клиента (можно использовать для heartbeat)
-        while True:
+        # Проверка аутентификации
+        user = None
+        if token:
             try:
-                data = await websocket.receive_text()
-                # Обработка heartbeat или других сообщений от клиента
-                if data == "ping":
-                    await websocket.send_json({"type": "pong"})
-            except WebSocketDisconnect:
-                break
-    except WebSocketDisconnect:
-        pass
-    finally:
-        manager.disconnect(websocket, None)
+                payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+                user_id = payload.get("sub")
+                if user_id:
+                    with engine.connect() as conn:
+                        user = conn.execute(
+                            text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
+                            {"id": user_id},
+                        ).mappings().first()
+            except Exception as e:
+                logger.warning("Ошибка проверки токена WebSocket: %s", e)
+        
+        if not user:
+            try:
+                await websocket.close(code=1008)
+            except:
+                pass
+            return
+        
+        # Только админы могут подписаться на все теплицы
+        if user["role"] != "admin":
+            try:
+                await websocket.close(code=1008)
+            except:
+                pass
+            return
+        
+        # Подключаем клиента (без конкретной теплицы - все теплицы)
+        try:
+            await manager.connect(websocket, None)
+        except Exception as e:
+            # Если это не WebSocket запрос (например, HTTP GET), просто игнорируем
+            logger.debug("Попытка подключения к WebSocket через HTTP: %s", e)
+            return
+        
+        try:
+            # Отправляем подтверждение подключения
+            await websocket.send_json({
+                "type": "connected",
+                "greenhouse_id": None,
+                "message": "Подключено к обновлениям данных с датчиков для всех теплиц"
+            })
+            
+            # Ожидаем сообщения от клиента (можно использовать для heartbeat)
+            while True:
+                try:
+                    data = await websocket.receive_text()
+                    # Обработка heartbeat или других сообщений от клиента
+                    if data == "ping":
+                        await websocket.send_json({"type": "pong"})
+                except WebSocketDisconnect:
+                    break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            manager.disconnect(websocket, None)
+    except Exception as e:
+        # Обрабатываем любые другие ошибки (например, HTTP запрос вместо WebSocket)
+        logger.debug("Ошибка WebSocket подключения: %s", e)
+        try:
+            await websocket.close(code=1008)
+        except:
+            pass
 
 
 @router.websocket("/ws/sensor-data/{greenhouse_id}")
@@ -2595,62 +2702,78 @@ async def websocket_sensor_data(websocket: WebSocket, greenhouse_id: str, token:
     - greenhouse_id: ID теплицы для подписки на обновления
     - token (query parameter): JWT токен для аутентификации (опционально, но рекомендуется)
     """
-    # Проверка аутентификации, если токен предоставлен
-    user = None
-    if token:
-        try:
-            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-            user_id = payload.get("sub")
-            if user_id:
-                with engine.connect() as conn:
-                    user = conn.execute(
-                        text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
-                        {"id": user_id},
-                    ).mappings().first()
-        except Exception as e:
-            logger.warning("Ошибка проверки токена WebSocket: %s", e)
-    
-    # Проверка доступа к теплице
-    if user:
-        with engine.connect() as conn:
-            if user["role"] == "worker":
-                has_access = conn.execute(
-                    text(
-                        """
-                        SELECT 1 FROM user_greenhouses
-                        WHERE user_id=:user_id AND greenhouse_id=:gh_id
-                    """
-                    ),
-                    {"user_id": user["id"], "gh_id": greenhouse_id},
-                ).scalar()
-                if not has_access:
-                    await websocket.close(code=1008)
-                    return
-    
-    # Подключаем клиента
-    await manager.connect(websocket, greenhouse_id)
-    
     try:
-        # Отправляем подтверждение подключения
-        await websocket.send_json({
-            "type": "connected",
-            "greenhouse_id": greenhouse_id,
-            "message": "Подключено к обновлениям данных с датчиков"
-        })
-        
-        # Ожидаем сообщения от клиента (можно использовать для heartbeat)
-        while True:
+        # Проверка аутентификации, если токен предоставлен
+        user = None
+        if token:
             try:
-                data = await websocket.receive_text()
-                # Обработка heartbeat или других сообщений от клиента
-                if data == "ping":
-                    await websocket.send_json({"type": "pong"})
-            except WebSocketDisconnect:
-                break
-    except WebSocketDisconnect:
-        pass
-    finally:
-        manager.disconnect(websocket, greenhouse_id)
+                payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+                user_id = payload.get("sub")
+                if user_id:
+                    with engine.connect() as conn:
+                        user = conn.execute(
+                            text("SELECT id, role FROM users WHERE id=:id AND is_active=1"),
+                            {"id": user_id},
+                        ).mappings().first()
+            except Exception as e:
+                logger.warning("Ошибка проверки токена WebSocket: %s", e)
+        
+        # Проверка доступа к теплице
+        if user:
+            with engine.connect() as conn:
+                if user["role"] == "worker":
+                    has_access = conn.execute(
+                        text(
+                            """
+                            SELECT 1 FROM user_greenhouses
+                            WHERE user_id=:user_id AND greenhouse_id=:gh_id
+                        """
+                        ),
+                        {"user_id": user["id"], "gh_id": greenhouse_id},
+                    ).scalar()
+                    if not has_access:
+                        try:
+                            await websocket.close(code=1008)
+                        except:
+                            pass
+                        return
+        
+        # Подключаем клиента
+        try:
+            await manager.connect(websocket, greenhouse_id)
+        except Exception as e:
+            # Если это не WebSocket запрос (например, HTTP GET), просто игнорируем
+            logger.debug("Попытка подключения к WebSocket через HTTP: %s", e)
+            return
+        
+        try:
+            # Отправляем подтверждение подключения
+            await websocket.send_json({
+                "type": "connected",
+                "greenhouse_id": greenhouse_id,
+                "message": "Подключено к обновлениям данных с датчиков"
+            })
+            
+            # Ожидаем сообщения от клиента (можно использовать для heartbeat)
+            while True:
+                try:
+                    data = await websocket.receive_text()
+                    # Обработка heartbeat или других сообщений от клиента
+                    if data == "ping":
+                        await websocket.send_json({"type": "pong"})
+                except WebSocketDisconnect:
+                    break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            manager.disconnect(websocket, greenhouse_id)
+    except Exception as e:
+        # Обрабатываем любые другие ошибки (например, HTTP запрос вместо WebSocket)
+        logger.debug("Ошибка WebSocket подключения: %s", e)
+        try:
+            await websocket.close(code=1008)
+        except:
+            pass
 
 
 # --- BLE Sensor Data ---
@@ -3207,6 +3330,172 @@ def mark_greenhouse_alerts_as_read(
     )
 
 
+# --- Overdue Reports ---
+@router.get("/overdue-reports", response_model=List[OverdueReportOut])
+def list_overdue_reports(
+    greenhouse_id: Optional[str] = None,
+    report_type: Optional[str] = None,
+    resolved: Optional[bool] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Получение списка репортов о просрочках полива/удобрения.
+    Фильтры:
+    - greenhouse_id: фильтр по теплице
+    - report_type: 'watering_overdue' или 'fertilizing_overdue'
+    - resolved: True - только решенные, False - только нерешенные, None - все
+    """
+    clauses: List[str] = []
+    params = {}
+
+    if current_user["role"] == "worker":
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1 FROM user_greenhouses ug
+                WHERE ug.greenhouse_id = odr.greenhouse_id
+                AND ug.user_id = :current_user_id
+            )
+        """
+        )
+        params["current_user_id"] = current_user["id"]
+
+    if greenhouse_id:
+        clauses.append("odr.greenhouse_id = :greenhouse_id")
+        params["greenhouse_id"] = greenhouse_id
+
+    if report_type:
+        if report_type not in ("watering_overdue", "fertilizing_overdue"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="report_type must be 'watering_overdue' or 'fertilizing_overdue'",
+            )
+        clauses.append("odr.report_type = :report_type")
+        params["report_type"] = report_type
+
+    if resolved is not None:
+        if resolved:
+            clauses.append("odr.resolved_at IS NOT NULL")
+        else:
+            clauses.append("odr.resolved_at IS NULL")
+
+    where_clause = " AND ".join(clauses) if clauses else "1=1"
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+            SELECT 
+                odr.id,
+                odr.greenhouse_id,
+                g.name as greenhouse_name,
+                odr.plant_instance_id,
+                odr.plant_type_id,
+                pt.name as plant_name,
+                odr.report_type,
+                odr.days_overdue,
+                odr.created_at,
+                odr.resolved_at
+            FROM overdue_reports odr
+            LEFT JOIN greenhouses g ON odr.greenhouse_id = g.id
+            LEFT JOIN plant_types pt ON odr.plant_type_id = pt.id
+            WHERE {where_clause}
+            ORDER BY odr.created_at DESC
+        """
+            ),
+            params,
+        ).mappings().all()
+
+        result = []
+        for r in rows:
+            result.append(OverdueReportOut(**dict(r)))
+
+        return result
+
+
+@router.get("/greenhouses/{gh_id}/overdue-reports", response_model=List[OverdueReportOut])
+def get_greenhouse_overdue_reports(
+    gh_id: str,
+    report_type: Optional[str] = None,
+    resolved: Optional[bool] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Получение репортов о просрочках для конкретной теплицы."""
+    # Проверка доступа
+    with engine.connect() as conn:
+        gh_exists = conn.execute(
+            text("SELECT 1 FROM greenhouses WHERE id=:id"), {"id": gh_id}
+        ).scalar()
+        if not gh_exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Greenhouse not found")
+
+        if current_user["role"] == "worker":
+            has_access = conn.execute(
+                text(
+                    """
+                SELECT 1 FROM user_greenhouses
+                WHERE user_id=:user_id AND greenhouse_id=:gh_id
+            """
+                ),
+                {"user_id": current_user["id"], "gh_id": gh_id},
+            ).scalar()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied to this greenhouse",
+                )
+
+        clauses: List[str] = ["odr.greenhouse_id = :gh_id"]
+        params = {"gh_id": gh_id}
+
+        if report_type:
+            if report_type not in ("watering_overdue", "fertilizing_overdue"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="report_type must be 'watering_overdue' or 'fertilizing_overdue'",
+                )
+            clauses.append("odr.report_type = :report_type")
+            params["report_type"] = report_type
+
+        if resolved is not None:
+            if resolved:
+                clauses.append("odr.resolved_at IS NOT NULL")
+            else:
+                clauses.append("odr.resolved_at IS NULL")
+
+        where_clause = " AND ".join(clauses)
+
+        rows = conn.execute(
+            text(
+                f"""
+            SELECT 
+                odr.id,
+                odr.greenhouse_id,
+                g.name as greenhouse_name,
+                odr.plant_instance_id,
+                odr.plant_type_id,
+                pt.name as plant_name,
+                odr.report_type,
+                odr.days_overdue,
+                odr.created_at,
+                odr.resolved_at
+            FROM overdue_reports odr
+            LEFT JOIN greenhouses g ON odr.greenhouse_id = g.id
+            LEFT JOIN plant_types pt ON odr.plant_type_id = pt.id
+            WHERE {where_clause}
+            ORDER BY odr.created_at DESC
+        """
+            ),
+            params,
+        ).mappings().all()
+
+        result = []
+        for r in rows:
+            result.append(OverdueReportOut(**dict(r)))
+
+        return result
+
+
 # --- Watering Check (Background Task) ---
 def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
     """
@@ -3220,6 +3509,7 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                 """
                 SELECT 
                     pi.id as plant_instance_id,
+                    pi.plant_type_id,
                     pt.watering_interval_days,
                     MAX(we.created_at) as last_watering
                 FROM plant_instances pi
@@ -3228,7 +3518,7 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                     AND we.type = 'watering'
                 WHERE pi.greenhouse_id = :gh_id
                     AND pt.watering_interval_days IS NOT NULL
-                GROUP BY pi.id, pt.watering_interval_days
+                GROUP BY pi.id, pi.plant_type_id, pt.watering_interval_days
             """
             ),
             {"gh_id": greenhouse_id},
@@ -3295,6 +3585,29 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                                     "msg": message,
                                 },
                             )
+                            
+                            # Создаем запись в таблице репортов
+                            if days_overdue > 0:
+                                report_id = new_id()
+                                conn.execute(
+                                    text(
+                                        """
+                                        INSERT INTO overdue_reports (
+                                            id, greenhouse_id, plant_instance_id, plant_type_id,
+                                            report_type, days_overdue
+                                        )
+                                        VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                                'watering_overdue', :days_overdue)
+                                    """
+                                    ),
+                                    {
+                                        "id": report_id,
+                                        "gh_id": greenhouse_id,
+                                        "plant_instance_id": plant_instance_id,
+                                        "plant_type_id": plant["plant_type_id"],
+                                        "days_overdue": days_overdue,
+                                    },
+                                )
             else:
                 # Если полива не было, следующий полив - через интервал от текущей даты
                 if interval_days:
@@ -3302,20 +3615,39 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                     days_until = interval_days
             
             # Обновляем поля next_watering_date и days_until в таблице plant_instances
-            conn.execute(
-                text(
+            # НЕ обновляем next_watering_date если полив просрочен - оставляем текущие значения
+            # чтобы просрочка отображалась корректно
+            if days_until is not None and days_until < 0:
+                # Если полив просрочен, НЕ обновляем дату, только обновляем days_until для отображения актуальной просрочки
+                conn.execute(
+                    text(
+                        """
+                        UPDATE plant_instances
+                        SET days_until = :days
+                        WHERE id = :plant_id
                     """
-                    UPDATE plant_instances
-                    SET next_watering_date = :next_date, days_until = :days
-                    WHERE id = :plant_id
-                """
-                ),
-                {
-                    "next_date": next_watering_date,
-                    "days": days_until,
-                    "plant_id": plant_instance_id,
-                },
-            )
+                    ),
+                    {
+                        "days": days_until,
+                        "plant_id": plant_instance_id,
+                    },
+                )
+            else:
+                # Если полив не просрочен, обновляем оба поля
+                conn.execute(
+                    text(
+                        """
+                        UPDATE plant_instances
+                        SET next_watering_date = :next_date, days_until = :days
+                        WHERE id = :plant_id
+                    """
+                    ),
+                    {
+                        "next_date": next_watering_date,
+                        "days": days_until,
+                        "plant_id": plant_instance_id,
+                    },
+                )
 
 
 def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
@@ -3330,6 +3662,7 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                 """
                 SELECT 
                     pi.id as plant_instance_id,
+                    pi.plant_type_id,
                     pt.fertilizing_interval_days,
                     MAX(we.created_at) as last_fertilizing
                 FROM plant_instances pi
@@ -3338,7 +3671,7 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                     AND we.type = 'fertilizing'
                 WHERE pi.greenhouse_id = :gh_id
                     AND pt.fertilizing_interval_days IS NOT NULL
-                GROUP BY pi.id, pt.fertilizing_interval_days
+                GROUP BY pi.id, pi.plant_type_id, pt.fertilizing_interval_days
             """
             ),
             {"gh_id": greenhouse_id},
@@ -3405,6 +3738,29 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                                     "msg": message,
                                 },
                             )
+                            
+                            # Создаем запись в таблице репортов
+                            if days_overdue > 0:
+                                report_id = new_id()
+                                conn.execute(
+                                    text(
+                                        """
+                                        INSERT INTO overdue_reports (
+                                            id, greenhouse_id, plant_instance_id, plant_type_id,
+                                            report_type, days_overdue
+                                        )
+                                        VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                                'fertilizing_overdue', :days_overdue)
+                                    """
+                                    ),
+                                    {
+                                        "id": report_id,
+                                        "gh_id": greenhouse_id,
+                                        "plant_instance_id": plant_instance_id,
+                                        "plant_type_id": plant["plant_type_id"],
+                                        "days_overdue": days_overdue,
+                                    },
+                                )
             else:
                 # Если удобрения не было, следующее удобрение - через интервал от текущей даты
                 if interval_days:
@@ -3412,294 +3768,456 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                     fertilizing_days_until = interval_days
             
             # Обновляем поля next_fertilizing_date и fertilizing_days_until в таблице plant_instances
-            conn.execute(
-                text(
+            # НЕ обновляем next_fertilizing_date если удобрение просрочено - оставляем текущие значения
+            # чтобы просрочка отображалась корректно
+            if fertilizing_days_until is not None and fertilizing_days_until < 0:
+                # Если удобрение просрочено, НЕ обновляем дату, только обновляем fertilizing_days_until для отображения актуальной просрочки
+                conn.execute(
+                    text(
+                        """
+                        UPDATE plant_instances
+                        SET fertilizing_days_until = :days
+                        WHERE id = :plant_id
                     """
-                    UPDATE plant_instances
-                    SET next_fertilizing_date = :next_date, fertilizing_days_until = :days
-                    WHERE id = :plant_id
-                """
-                ),
-                {
-                    "next_date": next_fertilizing_date,
-                    "days": fertilizing_days_until,
-                    "plant_id": plant_instance_id,
-                },
-            )
+                    ),
+                    {
+                        "days": fertilizing_days_until,
+                        "plant_id": plant_instance_id,
+                    },
+                )
+            else:
+                # Если удобрение не просрочено, обновляем оба поля
+                conn.execute(
+                    text(
+                        """
+                        UPDATE plant_instances
+                        SET next_fertilizing_date = :next_date, fertilizing_days_until = :days
+                        WHERE id = :plant_id
+                    """
+                    ),
+                    {
+                        "next_date": next_fertilizing_date,
+                        "days": fertilizing_days_until,
+                        "plant_id": plant_instance_id,
+                    },
+                )
 
 
 def check_watering_schedules():
     """
     Проверка теплиц, где подошло время полива и удобрения.
-    Каждый день в 00:01 пересчитывает дни до следующего полива и удобрения для всех теплиц.
-    Если срок истёк — создаётся запись в alerts и отправляется push-уведомление.
+    Использует ту же логику, что и эндпоинты next-watering и next-fertilizing.
+    Если days_until < 0 или is_overdue = True, создается репорт в базе.
     """
     with engine.begin() as conn:
-        # Получаем все теплицы с растениями для пересчета полива
-        greenhouses_watering = conn.execute(
-            text(
-                """
-                SELECT DISTINCT g.id as greenhouse_id
-                FROM greenhouses g
-                INNER JOIN plant_instances pi ON g.id = pi.greenhouse_id
-                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
-                WHERE pt.watering_interval_days IS NOT NULL
-            """
-            )
+        # Получаем все теплицы
+        greenhouses = conn.execute(
+            text("SELECT id, name FROM greenhouses")
         ).mappings().all()
         
-        # Пересчитываем дни до следующего полива для каждой теплицы
-        for gh in greenhouses_watering:
-            recalculate_watering_days_for_greenhouse(gh["greenhouse_id"])
+        now = datetime.now()
+        today = now.date()
         
-        # Получаем все теплицы с растениями для пересчета удобрений
-        greenhouses_fertilizing = conn.execute(
-            text(
-                """
-                SELECT DISTINCT g.id as greenhouse_id
-                FROM greenhouses g
-                INNER JOIN plant_instances pi ON g.id = pi.greenhouse_id
-                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
-                WHERE pt.fertilizing_interval_days IS NOT NULL
-            """
-            )
-        ).mappings().all()
-        
-        # Пересчитываем дни до следующего удобрения для каждой теплицы
-        for gh in greenhouses_fertilizing:
-            recalculate_fertilizing_days_for_greenhouse(gh["greenhouse_id"])
-        
-        overdue_plants = conn.execute(
-            text(
-                """
-            SELECT 
-                pi.id as plant_instance_id,
-                pi.greenhouse_id,
-                g.name as greenhouse_name,
-                pt.name as plant_name,
-                pt.watering_interval_days,
-                MAX(we.created_at) as last_watering
-            FROM plant_instances pi
-            INNER JOIN greenhouses g ON pi.greenhouse_id = g.id
-            INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
-            LEFT JOIN watering_events we ON we.plant_instance_id = pi.id 
-                AND we.type = 'watering'
-            WHERE pt.watering_interval_days IS NOT NULL
-            GROUP BY pi.id, pi.greenhouse_id, g.name, pt.name, pt.watering_interval_days
-            HAVING 
-                last_watering IS NULL 
-                OR datetime(last_watering, '+' || pt.watering_interval_days || ' days') < datetime('now')
-        """
-            )
-        ).mappings().all()
-
-        for plant in overdue_plants:
-            # Вычисляем актуальные дни просрочки
-            days_overdue = 0
-            if plant["last_watering"]:
-                try:
-                    last_date = plant["last_watering"]
-                    if isinstance(last_date, str):
-                        last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
-                    if isinstance(last_date, datetime):
-                        days_passed = (datetime.now() - last_date.replace(tzinfo=None)).days
-                        days_overdue = max(0, days_passed - plant["watering_interval_days"])
-                except Exception:
-                    days_overdue = 0
-
-            message = f"Требуется полив: {plant['plant_name']}"
-            if days_overdue > 0:
-                message += f" (просрочено на {days_overdue} дней)"
-
-            # Проверяем, есть ли уже непрочитанный alert такого же типа
-            existing_alert = conn.execute(
+        # Обрабатываем полив для каждой теплицы
+        for gh in greenhouses:
+            gh_id = gh["id"]
+            gh_name = gh["name"]
+            
+            # Получаем все растения в теплице с информацией о поливе (та же логика, что в эндпоинте)
+            watering_rows = conn.execute(
                 text(
                     """
-                SELECT id FROM alerts
-                WHERE greenhouse_id = :gh_id
-                AND type = 'watering_overdue'
-                AND is_read = 0
-                LIMIT 1
+                SELECT 
+                    pi.id as plant_instance_id,
+                    pi.greenhouse_id,
+                    pi.plant_type_id,
+                    pt.name as plant_name,
+                    pt.watering_interval_days,
+                    MAX(we.created_at) as last_watering,
+                    COALESCE(pi.next_watering_date, datetime(MAX(we.created_at), '+' || pt.watering_interval_days || ' days')) as next_watering_date,
+                    pi.days_until
+                FROM plant_instances pi
+                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
+                LEFT JOIN watering_events we ON we.plant_instance_id = pi.id 
+                    AND we.type = 'watering'
+                WHERE pi.greenhouse_id = :gh_id
+                    AND pt.watering_interval_days IS NOT NULL
+                GROUP BY pi.id, pi.greenhouse_id, pi.plant_type_id, pt.name, pt.watering_interval_days, pi.next_watering_date, pi.days_until
             """
                 ),
-                {"gh_id": plant["greenhouse_id"]},
-            ).mappings().first()
-
-            if existing_alert:
-                # Обновляем существующий alert с актуальными данными
-                conn.execute(
-                    text(
+                {"gh_id": gh_id},
+            ).mappings().all()
+            
+            for row in watering_rows:
+                days_until = None
+                is_overdue = False
+                
+                # Та же логика, что в эндпоинте get_next_watering_plants
+                if row["days_until"] is not None:
+                    days_until = row["days_until"]
+                    is_overdue = days_until < 0
+                elif not row["last_watering"]:
+                    if row["watering_interval_days"]:
+                        days_until = row["watering_interval_days"]
+                        is_overdue = False
+                else:
+                    next_date = row["next_watering_date"]
+                    if next_date:
+                        if isinstance(next_date, str):
+                            next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
+                        if isinstance(next_date, datetime):
+                            next_date = next_date.replace(tzinfo=None)
+                            days_until = (next_date.date() - today).days
+                            is_overdue = days_until < 0
+                    else:
+                        last_watering = row["last_watering"]
+                        if isinstance(last_watering, str):
+                            last_watering = datetime.fromisoformat(last_watering.replace("Z", "+00:00"))
+                        if isinstance(last_watering, datetime):
+                            last_watering = last_watering.replace(tzinfo=None)
+                            last_watering_date = last_watering.date()
+                            days_passed = (today - last_watering_date).days
+                            days_until = row["watering_interval_days"] - days_passed
+                            is_overdue = days_until < 0
+                
+                # Если просрочено, создаем/обновляем репорт
+                if is_overdue and days_until is not None:
+                    days_overdue = abs(days_until)
+                    
+                    # Проверяем существующий репорт
+                    existing_report = conn.execute(
+                        text(
+                            """
+                            SELECT id FROM overdue_reports
+                            WHERE greenhouse_id = :gh_id
+                            AND plant_instance_id = :plant_instance_id
+                            AND report_type = 'watering_overdue'
+                            AND resolved_at IS NULL
+                            LIMIT 1
                         """
-                    UPDATE alerts
-                    SET message = :msg, created_at = CURRENT_TIMESTAMP
-                    WHERE id = :alert_id
-                """
-                    ),
-                    {
-                        "alert_id": existing_alert["id"],
-                        "msg": message,
-                    },
-                )
-                logger.info(
-                    "Обновлен alert о просрочке полива для теплицы %s: %s",
-                    plant["greenhouse_id"],
-                    message,
-                )
-            else:
-                # Создаем новый alert
-                alert_id = new_id()
-                conn.execute(
-                    text(
+                        ),
+                        {
+                            "gh_id": gh_id,
+                            "plant_instance_id": row["plant_instance_id"],
+                        },
+                    ).mappings().first()
+                    
+                    if not existing_report:
+                        # Создаем новый репорт
+                        report_id = new_id()
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO overdue_reports (
+                                    id, greenhouse_id, plant_instance_id, plant_type_id,
+                                    report_type, days_overdue
+                                )
+                                VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                        'watering_overdue', :days_overdue)
+                            """
+                            ),
+                            {
+                                "id": report_id,
+                                "gh_id": gh_id,
+                                "plant_instance_id": row["plant_instance_id"],
+                                "plant_type_id": row["plant_type_id"],
+                                "days_overdue": days_overdue,
+                            },
+                        )
+                        logger.info(
+                            "Создан репорт о просрочке полива для теплицы %s, растения %s (просрочка: %d дней)",
+                            gh_id,
+                            row["plant_instance_id"],
+                            days_overdue,
+                        )
+                    else:
+                        # Обновляем существующий репорт
+                        conn.execute(
+                            text(
+                                """
+                                UPDATE overdue_reports
+                                SET days_overdue = :days_overdue,
+                                    created_at = CURRENT_TIMESTAMP
+                                WHERE id = :report_id
+                            """
+                            ),
+                            {
+                                "report_id": existing_report["id"],
+                                "days_overdue": days_overdue,
+                            },
+                        )
+                        logger.info(
+                            "Обновлен репорт о просрочке полива для теплицы %s, растения %s (просрочка: %d дней)",
+                            gh_id,
+                            row["plant_instance_id"],
+                            days_overdue,
+                        )
+                    
+                    # Создаем/обновляем alert
+                    message = f"Требуется полив: {row['plant_name']}"
+                    if days_overdue > 0:
+                        message += f" (просрочено на {days_overdue} дней)"
+                    
+                    existing_alert = conn.execute(
+                        text(
+                            """
+                            SELECT id FROM alerts
+                            WHERE greenhouse_id = :gh_id
+                            AND type = 'watering_overdue'
+                            AND is_read = 0
+                            LIMIT 1
                         """
-                    INSERT INTO alerts (id, greenhouse_id, type, message, severity)
-                    VALUES (:id, :gh_id, 'watering_overdue', :msg, 'warning')
-                """
-                    ),
-                    {
-                        "id": alert_id,
-                        "gh_id": plant["greenhouse_id"],
-                        "msg": message,
-                    },
-                )
-                logger.info(
-                    "Создан новый alert о просрочке полива для теплицы %s: %s",
-                    plant["greenhouse_id"],
-                    message,
-                )
-
-                # Отправляем уведомление только при создании нового alert
-                workers = conn.execute(
-                    text(
-                        """
-                    SELECT DISTINCT user_id FROM user_greenhouses
-                    WHERE greenhouse_id = :gh_id
-                """
-                    ),
-                    {"gh_id": plant["greenhouse_id"]},
-                ).mappings().all()
-
-                for worker in workers:
-                    send_push_notification(
-                        worker["user_id"],
-                        message,
-                        f"Требуется полив: {plant['greenhouse_name']}",
-                    )
-
-        overdue_fertilizing = conn.execute(
-            text(
-                """
-            SELECT 
-                pi.id as plant_instance_id,
-                pi.greenhouse_id,
-                g.name as greenhouse_name,
-                pt.name as plant_name,
-                pt.fertilizing_interval_days,
-                MAX(we.created_at) as last_fertilizing
-            FROM plant_instances pi
-            INNER JOIN greenhouses g ON pi.greenhouse_id = g.id
-            INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
-            LEFT JOIN watering_events we ON we.plant_instance_id = pi.id 
-                AND we.type = 'fertilizing'
-            WHERE pt.fertilizing_interval_days IS NOT NULL
-            GROUP BY pi.id, pi.greenhouse_id, g.name, pt.name, pt.fertilizing_interval_days
-            HAVING 
-                last_fertilizing IS NULL 
-                OR datetime(last_fertilizing, '+' || pt.fertilizing_interval_days || ' days') < datetime('now')
-        """
-            )
-        ).mappings().all()
-
-        for plant in overdue_fertilizing:
-            # Вычисляем актуальные дни просрочки
-            days_overdue = 0
-            if plant["last_fertilizing"]:
-                try:
-                    last_date = plant["last_fertilizing"]
-                    if isinstance(last_date, str):
-                        last_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
-                    if isinstance(last_date, datetime):
-                        days_passed = (datetime.now() - last_date.replace(tzinfo=None)).days
-                        days_overdue = max(0, days_passed - plant["fertilizing_interval_days"])
-                except Exception:
-                    days_overdue = 0
-
-            message = f"Требуется удобрение: {plant['plant_name']}"
-            if days_overdue > 0:
-                message += f" (просрочено на {days_overdue} дней)"
-
-            # Проверяем, есть ли уже непрочитанный alert такого же типа
-            existing_alert = conn.execute(
+                        ),
+                        {"gh_id": gh_id},
+                    ).mappings().first()
+                    
+                    if existing_alert:
+                        conn.execute(
+                            text(
+                                """
+                                UPDATE alerts
+                                SET message = :msg, created_at = CURRENT_TIMESTAMP
+                                WHERE id = :alert_id
+                            """
+                            ),
+                            {
+                                "alert_id": existing_alert["id"],
+                                "msg": message,
+                            },
+                        )
+                    else:
+                        alert_id = new_id()
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO alerts (id, greenhouse_id, type, message, severity)
+                                VALUES (:id, :gh_id, 'watering_overdue', :msg, 'warning')
+                            """
+                            ),
+                            {
+                                "id": alert_id,
+                                "gh_id": gh_id,
+                                "msg": message,
+                            },
+                        )
+                        
+                        # Отправляем уведомление
+                        workers = conn.execute(
+                            text(
+                                """
+                                SELECT DISTINCT user_id FROM user_greenhouses
+                                WHERE greenhouse_id = :gh_id
+                            """
+                            ),
+                            {"gh_id": gh_id},
+                        ).mappings().all()
+                        
+                        for worker in workers:
+                            send_push_notification(
+                                worker["user_id"],
+                                message,
+                                f"Требуется полив: {gh_name}",
+                            )
+        
+        # Обрабатываем удобрения для каждой теплицы
+        for gh in greenhouses:
+            gh_id = gh["id"]
+            gh_name = gh["name"]
+            
+            # Получаем все растения в теплице с информацией об удобрении (та же логика, что в эндпоинте)
+            fertilizing_rows = conn.execute(
                 text(
                     """
-                SELECT id FROM alerts
-                WHERE greenhouse_id = :gh_id
-                AND type = 'fertilizing_overdue'
-                AND is_read = 0
-                LIMIT 1
+                SELECT 
+                    pi.id as plant_instance_id,
+                    pi.greenhouse_id,
+                    pi.plant_type_id,
+                    pt.name as plant_name,
+                    pt.fertilizing_interval_days,
+                    MAX(we.created_at) as last_fertilizing,
+                    COALESCE(pi.next_fertilizing_date, datetime(MAX(we.created_at), '+' || pt.fertilizing_interval_days || ' days')) as next_fertilizing_date,
+                    pi.fertilizing_days_until
+                FROM plant_instances pi
+                INNER JOIN plant_types pt ON pi.plant_type_id = pt.id
+                LEFT JOIN watering_events we ON we.plant_instance_id = pi.id 
+                    AND we.type = 'fertilizing'
+                WHERE pi.greenhouse_id = :gh_id
+                    AND pt.fertilizing_interval_days IS NOT NULL
+                GROUP BY pi.id, pi.greenhouse_id, pi.plant_type_id, pt.name, pt.fertilizing_interval_days, pi.next_fertilizing_date, pi.fertilizing_days_until
             """
                 ),
-                {"gh_id": plant["greenhouse_id"]},
-            ).mappings().first()
-
-            if existing_alert:
-                # Обновляем существующий alert с актуальными данными
-                conn.execute(
-                    text(
+                {"gh_id": gh_id},
+            ).mappings().all()
+            
+            for row in fertilizing_rows:
+                fertilizing_days_until = None
+                is_overdue = False
+                
+                # Та же логика, что в эндпоинте get_next_fertilizing_plants
+                if row["fertilizing_days_until"] is not None:
+                    fertilizing_days_until = row["fertilizing_days_until"]
+                    is_overdue = fertilizing_days_until < 0
+                elif not row["last_fertilizing"]:
+                    if row["fertilizing_interval_days"]:
+                        fertilizing_days_until = row["fertilizing_interval_days"]
+                else:
+                    next_date = row["next_fertilizing_date"]
+                    if next_date:
+                        if isinstance(next_date, str):
+                            next_date = datetime.fromisoformat(next_date.replace("Z", "+00:00"))
+                        if isinstance(next_date, datetime):
+                            next_date = next_date.replace(tzinfo=None)
+                            fertilizing_days_until = (next_date.date() - today).days
+                            is_overdue = fertilizing_days_until < 0
+                    else:
+                        last_fertilizing = row["last_fertilizing"]
+                        if isinstance(last_fertilizing, str):
+                            last_fertilizing = datetime.fromisoformat(last_fertilizing.replace("Z", "+00:00"))
+                        if isinstance(last_fertilizing, datetime):
+                            last_fertilizing = last_fertilizing.replace(tzinfo=None)
+                            last_fertilizing_date = last_fertilizing.date()
+                            days_passed = (today - last_fertilizing_date).days
+                            fertilizing_days_until = row["fertilizing_interval_days"] - days_passed
+                            is_overdue = fertilizing_days_until < 0
+                
+                # Если просрочено, создаем/обновляем репорт
+                if is_overdue and fertilizing_days_until is not None:
+                    days_overdue = abs(fertilizing_days_until)
+                    
+                    # Проверяем существующий репорт
+                    existing_report = conn.execute(
+                        text(
+                            """
+                            SELECT id FROM overdue_reports
+                            WHERE greenhouse_id = :gh_id
+                            AND plant_instance_id = :plant_instance_id
+                            AND report_type = 'fertilizing_overdue'
+                            AND resolved_at IS NULL
+                            LIMIT 1
                         """
-                    UPDATE alerts
-                    SET message = :msg, created_at = CURRENT_TIMESTAMP
-                    WHERE id = :alert_id
-                """
-                    ),
-                    {
-                        "alert_id": existing_alert["id"],
-                        "msg": message,
-                    },
-                )
-                logger.info(
-                    "Обновлен alert о просрочке удобрения для теплицы %s: %s",
-                    plant["greenhouse_id"],
-                    message,
-                )
-            else:
-                # Создаем новый alert
-                alert_id = new_id()
-                conn.execute(
-                    text(
+                        ),
+                        {
+                            "gh_id": gh_id,
+                            "plant_instance_id": row["plant_instance_id"],
+                        },
+                    ).mappings().first()
+                    
+                    if not existing_report:
+                        # Создаем новый репорт
+                        report_id = new_id()
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO overdue_reports (
+                                    id, greenhouse_id, plant_instance_id, plant_type_id,
+                                    report_type, days_overdue
+                                )
+                                VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                        'fertilizing_overdue', :days_overdue)
+                            """
+                            ),
+                            {
+                                "id": report_id,
+                                "gh_id": gh_id,
+                                "plant_instance_id": row["plant_instance_id"],
+                                "plant_type_id": row["plant_type_id"],
+                                "days_overdue": days_overdue,
+                            },
+                        )
+                        logger.info(
+                            "Создан репорт о просрочке удобрения для теплицы %s, растения %s (просрочка: %d дней)",
+                            gh_id,
+                            row["plant_instance_id"],
+                            days_overdue,
+                        )
+                    else:
+                        # Обновляем существующий репорт
+                        conn.execute(
+                            text(
+                                """
+                                UPDATE overdue_reports
+                                SET days_overdue = :days_overdue,
+                                    created_at = CURRENT_TIMESTAMP
+                                WHERE id = :report_id
+                            """
+                            ),
+                            {
+                                "report_id": existing_report["id"],
+                                "days_overdue": days_overdue,
+                            },
+                        )
+                        logger.info(
+                            "Обновлен репорт о просрочке удобрения для теплицы %s, растения %s (просрочка: %d дней)",
+                            gh_id,
+                            row["plant_instance_id"],
+                            days_overdue,
+                        )
+                    
+                    # Создаем/обновляем alert
+                    message = f"Требуется удобрение: {row['plant_name']}"
+                    if days_overdue > 0:
+                        message += f" (просрочено на {days_overdue} дней)"
+                    
+                    existing_alert = conn.execute(
+                        text(
+                            """
+                            SELECT id FROM alerts
+                            WHERE greenhouse_id = :gh_id
+                            AND type = 'fertilizing_overdue'
+                            AND is_read = 0
+                            LIMIT 1
                         """
-                    INSERT INTO alerts (id, greenhouse_id, type, message, severity)
-                    VALUES (:id, :gh_id, 'fertilizing_overdue', :msg, 'warning')
-                """
-                    ),
-                    {
-                        "id": alert_id,
-                        "gh_id": plant["greenhouse_id"],
-                        "msg": message,
-                    },
-                )
-                logger.info(
-                    "Создан новый alert о просрочке удобрения для теплицы %s: %s",
-                    plant["greenhouse_id"],
-                    message,
-                )
-
-                # Отправляем уведомление только при создании нового alert
-                workers = conn.execute(
-                    text(
-                        """
-                    SELECT DISTINCT user_id FROM user_greenhouses
-                    WHERE greenhouse_id = :gh_id
-                """
-                    ),
-                    {"gh_id": plant["greenhouse_id"]},
-                ).mappings().all()
-
-                for worker in workers:
-                    send_push_notification(
-                        worker["user_id"],
-                        message,
-                        f"Требуется удобрение: {plant['greenhouse_name']}",
-                    )
+                        ),
+                        {"gh_id": gh_id},
+                    ).mappings().first()
+                    
+                    if existing_alert:
+                        conn.execute(
+                            text(
+                                """
+                                UPDATE alerts
+                                SET message = :msg, created_at = CURRENT_TIMESTAMP
+                                WHERE id = :alert_id
+                            """
+                            ),
+                            {
+                                "alert_id": existing_alert["id"],
+                                "msg": message,
+                            },
+                        )
+                    else:
+                        alert_id = new_id()
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO alerts (id, greenhouse_id, type, message, severity)
+                                VALUES (:id, :gh_id, 'fertilizing_overdue', :msg, 'warning')
+                            """
+                            ),
+                            {
+                                "id": alert_id,
+                                "gh_id": gh_id,
+                                "msg": message,
+                            },
+                        )
+                        
+                        # Отправляем уведомление
+                        workers = conn.execute(
+                            text(
+                                """
+                                SELECT DISTINCT user_id FROM user_greenhouses
+                                WHERE greenhouse_id = :gh_id
+                            """
+                            ),
+                            {"gh_id": gh_id},
+                        ).mappings().all()
+                        
+                        for worker in workers:
+                            send_push_notification(
+                                worker["user_id"],
+                                message,
+                                f"Требуется удобрение: {gh_name}",
+                            )
 
 
 @router.post("/check-watering", status_code=200)
