@@ -61,36 +61,7 @@ def populate_database():
                     user_ids.append(existing)
                     print(f"  - Пользователь {user['email']} уже существует")
         
-        # 2. Сенсоры
-        print("Создаю сенсоры...")
-        sensors = [
-            {"id": new_id(), "ble_identifier": "SENSOR_001", "last_temperature": 22.5, "last_humidity": 65.0},
-            {"id": new_id(), "ble_identifier": "SENSOR_002", "last_temperature": 24.0, "last_humidity": 70.0},
-            {"id": new_id(), "ble_identifier": "SENSOR_003", "last_temperature": 23.0, "last_humidity": 68.0},
-        ]
-        
-        sensor_ids = []
-        for sensor in sensors:
-            try:
-                conn.execute(
-                    text("""
-                        INSERT INTO sensors (id, ble_identifier, last_temperature, last_humidity, last_update)
-                        VALUES (:id, :ble_identifier, :last_temperature, :last_humidity, datetime('now'))
-                    """),
-                    sensor
-                )
-                sensor_ids.append(sensor["id"])
-                print(f"  ✓ Создан сенсор: {sensor['ble_identifier']}")
-            except Exception as e:
-                existing = conn.execute(
-                    text("SELECT id FROM sensors WHERE ble_identifier=:ble"),
-                    {"ble": sensor["ble_identifier"]}
-                ).scalar()
-                if existing:
-                    sensor_ids.append(existing)
-                    print(f"  - Сенсор {sensor['ble_identifier']} уже существует")
-        
-        # 3. Типы растений
+        # 2. Типы растений
         print("Создаю типы растений...")
         plant_types = [
             {
@@ -145,7 +116,7 @@ def populate_database():
             except Exception as e:
                 print(f"  ✗ Ошибка при создании типа растения {pt['name']}: {e}")
         
-        # 4. Теплицы
+        # 3. Теплицы
         print("Создаю теплицы...")
         greenhouses = [
             {
@@ -153,7 +124,6 @@ def populate_database():
                 "name": "Теплица №1",
                 "description": "Основная теплица для томатов",
                 "image_url": "/static/greenhouses/greenhouse_1.png",
-                "sensor_id": sensor_ids[0] if sensor_ids else None,
                 "target_temp_min": 20.0,
                 "target_temp_max": 24.0,
                 "target_hum_min": 65.0,
@@ -164,7 +134,6 @@ def populate_database():
                 "name": "Теплица №2",
                 "description": "Теплица для огурцов",
                 "image_url": "/static/greenhouses/greenhouse_2.png",
-                "sensor_id": sensor_ids[1] if len(sensor_ids) > 1 else None,
                 "target_temp_min": 22.0,
                 "target_temp_max": 26.0,
                 "target_hum_min": 70.0,
@@ -175,7 +144,6 @@ def populate_database():
                 "name": "Теплица №3",
                 "description": "Теплица для перца",
                 "image_url": "/static/greenhouses/greenhouse_3.png",
-                "sensor_id": sensor_ids[2] if len(sensor_ids) > 2 else None,
                 "target_temp_min": 23.0,
                 "target_temp_max": 25.0,
                 "target_hum_min": 70.0,
@@ -188,9 +156,9 @@ def populate_database():
             try:
                 conn.execute(
                     text("""
-                        INSERT INTO greenhouses (id, name, description, image_url, sensor_id,
+                        INSERT INTO greenhouses (id, name, description, image_url,
                                                 target_temp_min, target_temp_max, target_hum_min, target_hum_max)
-                        VALUES (:id, :name, :description, :image_url, :sensor_id,
+                        VALUES (:id, :name, :description, :image_url,
                                 :target_temp_min, :target_temp_max, :target_hum_min, :target_hum_max)
                     """),
                     gh
@@ -200,7 +168,7 @@ def populate_database():
             except Exception as e:
                 print(f"  ✗ Ошибка при создании теплицы {gh['name']}: {e}")
         
-        # 5. Связь пользователей с теплицами
+        # 4. Связь пользователей с теплицами
         print("Связываю пользователей с теплицами...")
         for i, gh_id in enumerate(greenhouse_ids):
             if len(user_ids) > 1:
@@ -220,7 +188,7 @@ def populate_database():
                 except Exception:
                     pass
         
-        # 6. Экземпляры растений
+        # 5. Экземпляры растений
         print("Создаю экземпляры растений...")
         plant_instances = []
         if greenhouse_ids and plant_type_ids:
@@ -263,7 +231,7 @@ def populate_database():
             except Exception as e:
                 print(f"  ✗ Ошибка при создании экземпляра: {e}")
         
-        # 7. События полива (старые данные)
+        # 6. События полива (старые данные)
         print("Создаю события полива...")
         base_date = datetime.now() - timedelta(days=30)
         event_count = 0
@@ -291,34 +259,114 @@ def populate_database():
                     pass
         print(f"  ✓ Создано {event_count} событий полива")
         
-        # 8. Показания сенсоров (старые данные)
-        print("Создаю показания сенсоров...")
-        reading_count = 0
-        for i in range(50):
-            reading_date = base_date + timedelta(hours=i*14)
-            if sensor_ids:
-                sensor_idx = i % len(sensor_ids)
+        # 7. Отчеты о просрочках
+        print("Создаю отчеты о просрочках...")
+        overdue_count = 0
+        base_date = datetime.now() - timedelta(days=30)
+        
+        # Создаем различные отчеты о просрочках
+        overdue_reports = [
+            {
+                "greenhouse_id": greenhouse_ids[0] if greenhouse_ids else None,
+                "plant_instance_id": plant_instance_ids[0] if plant_instance_ids else None,
+                "plant_type_id": plant_type_ids[0] if plant_type_ids else None,
+                "report_type": "watering_overdue",
+                "days_overdue": 5,
+                "created_at": (base_date + timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S"),
+                "resolved_at": None
+            },
+            {
+                "greenhouse_id": greenhouse_ids[0] if greenhouse_ids else None,
+                "plant_instance_id": plant_instance_ids[0] if plant_instance_ids else None,
+                "plant_type_id": plant_type_ids[0] if plant_type_ids else None,
+                "report_type": "fertilizing_overdue",
+                "days_overdue": 10,
+                "created_at": (base_date + timedelta(days=15)).strftime("%Y-%m-%d %H:%M:%S"),
+                "resolved_at": (base_date + timedelta(days=18)).strftime("%Y-%m-%d %H:%M:%S")
+            },
+            {
+                "greenhouse_id": greenhouse_ids[1] if len(greenhouse_ids) > 1 else (greenhouse_ids[0] if greenhouse_ids else None),
+                "plant_instance_id": plant_instance_ids[1] if len(plant_instance_ids) > 1 else (plant_instance_ids[0] if plant_instance_ids else None),
+                "plant_type_id": plant_type_ids[1] if len(plant_type_ids) > 1 else (plant_type_ids[0] if plant_type_ids else None),
+                "report_type": "watering_overdue",
+                "days_overdue": 3,
+                "created_at": (base_date + timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S"),
+                "resolved_at": None
+            },
+            {
+                "greenhouse_id": greenhouse_ids[1] if len(greenhouse_ids) > 1 else (greenhouse_ids[0] if greenhouse_ids else None),
+                "plant_instance_id": plant_instance_ids[1] if len(plant_instance_ids) > 1 else (plant_instance_ids[0] if plant_instance_ids else None),
+                "plant_type_id": plant_type_ids[1] if len(plant_type_ids) > 1 else (plant_type_ids[0] if plant_type_ids else None),
+                "report_type": "fertilizing_overdue",
+                "days_overdue": 7,
+                "created_at": (base_date + timedelta(days=12)).strftime("%Y-%m-%d %H:%M:%S"),
+                "resolved_at": (base_date + timedelta(days=14)).strftime("%Y-%m-%d %H:%M:%S")
+            },
+            {
+                "greenhouse_id": greenhouse_ids[2] if len(greenhouse_ids) > 2 else (greenhouse_ids[0] if greenhouse_ids else None),
+                "plant_instance_id": plant_instance_ids[2] if len(plant_instance_ids) > 2 else (plant_instance_ids[0] if plant_instance_ids else None),
+                "plant_type_id": plant_type_ids[2] if len(plant_type_ids) > 2 else (plant_type_ids[0] if plant_type_ids else None),
+                "report_type": "watering_overdue",
+                "days_overdue": 8,
+                "created_at": (base_date + timedelta(days=25)).strftime("%Y-%m-%d %H:%M:%S"),
+                "resolved_at": None
+            },
+            {
+                "greenhouse_id": greenhouse_ids[2] if len(greenhouse_ids) > 2 else (greenhouse_ids[0] if greenhouse_ids else None),
+                "plant_instance_id": plant_instance_ids[2] if len(plant_instance_ids) > 2 else (plant_instance_ids[0] if plant_instance_ids else None),
+                "plant_type_id": plant_type_ids[2] if len(plant_type_ids) > 2 else (plant_type_ids[0] if plant_type_ids else None),
+                "report_type": "fertilizing_overdue",
+                "days_overdue": 15,
+                "created_at": (base_date + timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S"),
+                "resolved_at": (base_date + timedelta(days=12)).strftime("%Y-%m-%d %H:%M:%S")
+            },
+            {
+                "greenhouse_id": greenhouse_ids[0] if greenhouse_ids else None,
+                "plant_instance_id": plant_instance_ids[0] if plant_instance_ids else None,
+                "plant_type_id": plant_type_ids[0] if plant_type_ids else None,
+                "report_type": "watering_overdue",
+                "days_overdue": 2,
+                "created_at": (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"),
+                "resolved_at": None
+            },
+            {
+                "greenhouse_id": greenhouse_ids[1] if len(greenhouse_ids) > 1 else (greenhouse_ids[0] if greenhouse_ids else None),
+                "plant_instance_id": plant_instance_ids[1] if len(plant_instance_ids) > 1 else (plant_instance_ids[0] if plant_instance_ids else None),
+                "plant_type_id": plant_type_ids[1] if len(plant_type_ids) > 1 else (plant_type_ids[0] if plant_type_ids else None),
+                "report_type": "fertilizing_overdue",
+                "days_overdue": 12,
+                "created_at": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S"),
+                "resolved_at": None
+            }
+        ]
+        
+        for report in overdue_reports:
+            if report["greenhouse_id"]:
                 try:
                     conn.execute(
                         text("""
-                            INSERT INTO sensor_readings (id, sensor_id, greenhouse_id, temperature, humidity, created_at)
-                            VALUES (:id, :sensor_id, :greenhouse_id, :temperature, :humidity, :created_at)
+                            INSERT INTO overdue_reports (id, greenhouse_id, plant_instance_id, plant_type_id, 
+                                                         report_type, days_overdue, created_at, resolved_at)
+                            VALUES (:id, :greenhouse_id, :plant_instance_id, :plant_type_id, 
+                                    :report_type, :days_overdue, :created_at, :resolved_at)
                         """),
                         {
                             "id": new_id(),
-                            "sensor_id": sensor_ids[sensor_idx],
-                            "greenhouse_id": greenhouse_ids[sensor_idx] if sensor_idx < len(greenhouse_ids) else None,
-                            "temperature": 20.0 + (i % 10) * 0.5,
-                            "humidity": 60.0 + (i % 20) * 1.0,
-                            "created_at": reading_date.strftime("%Y-%m-%d %H:%M:%S")
+                            "greenhouse_id": report["greenhouse_id"],
+                            "plant_instance_id": report["plant_instance_id"],
+                            "plant_type_id": report["plant_type_id"],
+                            "report_type": report["report_type"],
+                            "days_overdue": report["days_overdue"],
+                            "created_at": report["created_at"],
+                            "resolved_at": report["resolved_at"]
                         }
                     )
-                    reading_count += 1
-                except Exception:
+                    overdue_count += 1
+                except Exception as e:
                     pass
-        print(f"  ✓ Создано {reading_count} показаний сенсоров")
+        print(f"  ✓ Создано {overdue_count} отчетов о просрочках")
         
-        # 9. Уведомления
+        # 8. Уведомления
         print("Создаю уведомления...")
         alert_count = 0
         for i in range(10):
