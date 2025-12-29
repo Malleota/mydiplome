@@ -3096,21 +3096,64 @@ def get_current_sensor_data(gh_id: str, current_user: dict = Depends(get_current
                 {"sensor_id": gh["sensor_id"]},
             ).mappings().first()
             
-            if not sensor or sensor["temperature"] is None:
+            if not sensor:
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND, detail="No sensor data available"
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Sensor not found"
                 )
+            
+            # Проверяем, не старше ли данные 2 минут
+            sensor_created_at = sensor["created_at"]
+            if sensor_created_at:
+                # Убираем timezone если есть
+                if hasattr(sensor_created_at, 'tzinfo') and sensor_created_at.tzinfo is not None:
+                    sensor_created_at = sensor_created_at.replace(tzinfo=None)
+                time_diff = datetime.now() - sensor_created_at
+            else:
+                time_diff = timedelta(minutes=3)  # Если нет времени, считаем устаревшими
+            
+            # Если данных нет или они старше 2 минут, возвращаем None
+            if sensor["temperature"] is None or time_diff > timedelta(minutes=2):
+                temperature = None
+                humidity = None
+            else:
+                temperature = sensor["temperature"]
+                humidity = sensor["humidity"]
             
             return SensorReadingOut(
                 id="",
                 sensor_id=sensor["id"],
                 greenhouse_id=gh_id,
-                temperature=sensor["temperature"],
-                humidity=sensor["humidity"],
-                created_at=sensor["created_at"] or datetime.now(),
+                temperature=temperature,
+                humidity=humidity,
+                created_at=sensor_created_at or datetime.now(),
             )
         
-        return SensorReadingOut(**reading)
+        # Проверяем, не старше ли данные 2 минут
+        reading_created_at = reading["created_at"]
+        if reading_created_at:
+            # Убираем timezone если есть
+            if hasattr(reading_created_at, 'tzinfo') and reading_created_at.tzinfo is not None:
+                reading_created_at = reading_created_at.replace(tzinfo=None)
+            time_diff = datetime.now() - reading_created_at
+        else:
+            time_diff = timedelta(minutes=3)  # Если нет времени, считаем устаревшими
+        
+        # Если данные старше 2 минут, возвращаем None
+        if time_diff > timedelta(minutes=2):
+            temperature = None
+            humidity = None
+        else:
+            temperature = reading["temperature"]
+            humidity = reading["humidity"]
+        
+        return SensorReadingOut(
+            id=reading["id"],
+            sensor_id=reading["sensor_id"],
+            greenhouse_id=reading["greenhouse_id"],
+            temperature=temperature,
+            humidity=humidity,
+            created_at=reading_created_at or reading["created_at"],
+        )
 
 
 @router.get("/greenhouses/{gh_id}/sensor-data", response_model=List[SensorReadingOut])

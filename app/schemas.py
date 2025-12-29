@@ -239,8 +239,8 @@ class SensorReadingOut(BaseModel):
     id: str
     sensor_id: str
     greenhouse_id: Optional[str] = None
-    temperature: float
-    humidity: float
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
     created_at: datetime
 
 
