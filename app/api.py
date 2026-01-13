@@ -30,6 +30,7 @@ from .dependencies import (
 from .websocket_manager import manager
 from jose import jwt
 from .config import JWT_SECRET_KEY, JWT_ALGORITHM
+from database import get_default_plant_type_images
 from .schemas import (
     AlertOut,
     AvatarOut,
@@ -46,6 +47,7 @@ from .schemas import (
     PlantInstanceOut,
     PlantInstanceUpdate,
     PlantTypeCreate,
+    PlantTypeImageOut,
     PlantTypeOut,
     PlantTypeUpdate,
     ReportOut,
@@ -1145,6 +1147,22 @@ def list_workers(current_user: dict = Depends(get_current_user)):
 
 
 # --- Plant types ---
+@router.get("/plant-type-images", response_model=List[PlantTypeImageOut])
+def list_plant_type_images():
+    """Получение списка доступных изображений для типов растений."""
+    images = get_default_plant_type_images()
+    result = []
+    for image_id, image_url, name in images:
+        # Формируем полный URL для изображения
+        full_url = get_full_static_url(image_url)
+        result.append(PlantTypeImageOut(
+            id=image_id,
+            image_url=full_url,
+            name=name
+        ))
+    return result
+
+
 def validate_plant_image_url(image_url: Optional[str]) -> Optional[str]:
     """Валидирует, что image_url для растений указывает на правильную папку."""
     if not image_url:

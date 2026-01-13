@@ -224,6 +224,12 @@ class GreenhouseImageOut(BaseModel):
     name: Optional[str] = None
 
 
+class PlantTypeImageOut(BaseModel):
+    id: str
+    image_url: str
+    name: Optional[str] = None
+
+
 class NextWateringOut(BaseModel):
     """Информация о ближайшем поливе."""
     greenhouse_id: str
