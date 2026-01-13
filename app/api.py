@@ -751,11 +751,24 @@ def update_greenhouse(
         update_fields = []
         params = {"gh_id": gh_id}
         
+        # Получаем набор переданных полей (работает для Pydantic v1 и v2)
+        fields_set = getattr(payload, 'model_fields_set', None) or getattr(payload, '__fields_set__', None) or set()
+        if not fields_set:
+            # Если model_fields_set недоступен, используем model_dump(exclude_unset=True)
+            try:
+                dumped = payload.model_dump(exclude_unset=True)
+                fields_set = set(dumped.keys())
+            except AttributeError:
+                # Fallback для старых версий Pydantic
+                dumped = payload.dict(exclude_unset=True)
+                fields_set = set(dumped.keys())
+        
         if payload.name is not None:
             update_fields.append("name = :name")
             params["name"] = payload.name
         
-        if payload.description is not None:
+        # Проверяем, было ли поле description передано в запросе (даже если оно None или пустая строка)
+        if 'description' in fields_set:
             update_fields.append("description = :description")
             params["description"] = payload.description
         
@@ -1358,11 +1371,24 @@ def update_plant_type(
         update_fields = []
         params = {"pt_id": pt_id}
         
+        # Получаем набор переданных полей (работает для Pydantic v1 и v2)
+        fields_set = getattr(payload, 'model_fields_set', None) or getattr(payload, '__fields_set__', None) or set()
+        if not fields_set:
+            # Если model_fields_set недоступен, используем model_dump(exclude_unset=True)
+            try:
+                dumped = payload.model_dump(exclude_unset=True)
+                fields_set = set(dumped.keys())
+            except AttributeError:
+                # Fallback для старых версий Pydantic
+                dumped = payload.dict(exclude_unset=True)
+                fields_set = set(dumped.keys())
+        
         if payload.name is not None:
             update_fields.append("name = :name")
             params["name"] = payload.name
         
-        if payload.description is not None:
+        # Проверяем, было ли поле description передано в запросе (даже если оно None или пустая строка)
+        if 'description' in fields_set:
             update_fields.append("description = :description")
             params["description"] = payload.description
         
@@ -1594,6 +1620,18 @@ def update_plant_instance(
         update_fields = []
         params = {"pi_id": pi_id, "gh_id": gh_id}
         
+        # Получаем набор переданных полей (работает для Pydantic v1 и v2)
+        fields_set = getattr(payload, 'model_fields_set', None) or getattr(payload, '__fields_set__', None) or set()
+        if not fields_set:
+            # Если model_fields_set недоступен, используем model_dump(exclude_unset=True)
+            try:
+                dumped = payload.model_dump(exclude_unset=True)
+                fields_set = set(dumped.keys())
+            except AttributeError:
+                # Fallback для старых версий Pydantic
+                dumped = payload.dict(exclude_unset=True)
+                fields_set = set(dumped.keys())
+        
         if payload.plant_type_id is not None:
             update_fields.append("plant_type_id = :pt_id")
             params["pt_id"] = payload.plant_type_id
@@ -1602,7 +1640,8 @@ def update_plant_instance(
             update_fields.append("quantity = :qty")
             params["qty"] = payload.quantity
         
-        if payload.note is not None:
+        # Проверяем, было ли поле note передано в запросе (даже если оно None или пустая строка)
+        if 'note' in fields_set:
             update_fields.append("note = :note")
             params["note"] = payload.note
         
