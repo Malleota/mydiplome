@@ -352,6 +352,17 @@ def ensure_schema(engine: Engine, db_path: str = None):
                 logger.info("Добавлена колонка fertilizing_days_until в таблицу plant_instances")
             except OperationalError as e:
                 logger.warning(f"Не удалось добавить колонку fertilizing_days_until: {e}")
+        
+        # Миграция: добавляем поле plant_type_name в overdue_reports, если его нет
+        table_info_reports = conn.execute(text("PRAGMA table_info(overdue_reports)")).fetchall()
+        column_names_reports = [row[1] for row in table_info_reports]
+        
+        if "plant_type_name" not in column_names_reports:
+            try:
+                conn.execute(text("ALTER TABLE overdue_reports ADD COLUMN plant_type_name TEXT"))
+                logger.info("Добавлена колонка plant_type_name в таблицу overdue_reports")
+            except OperationalError as e:
+                logger.warning(f"Не удалось добавить колонку plant_type_name: {e}")
     
     logger.info("Схема базы данных успешно инициализирована")
 

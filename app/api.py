@@ -1297,11 +1297,41 @@ def create_plant_type(payload: PlantTypeCreate, admin: dict = Depends(require_ad
 def delete_plant_type(pt_id: str, admin: dict = Depends(require_admin)):
     """Удаление растения из справочника. Доступ: admin."""
     with engine.begin() as conn:
+        # Получаем информацию о типе растения (имя для сохранения в отчетах)
+        pt_row = conn.execute(
+            text("SELECT name FROM plant_types WHERE id=:id"), {"id": pt_id}
+        ).first()
+        
+        if not pt_row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plant type not found")
+        
+        plant_type_name = pt_row[0]
+        
+        # Сохраняем имя растения в отчетах перед удалением
+        conn.execute(
+            text("""
+                UPDATE overdue_reports 
+                SET plant_type_name = :name 
+                WHERE plant_type_id = :id AND plant_type_name IS NULL
+            """),
+            {"name": plant_type_name, "id": pt_id}
+        )
+        
+        # Удаляем все связанные экземпляры растений (каскадное удаление через ON DELETE CASCADE)
+        # Но сначала нужно удалить их явно, так как plant_instances имеет ON DELETE RESTRICT для plant_type_id
+        conn.execute(
+            text("DELETE FROM plant_instances WHERE plant_type_id = :id"),
+            {"id": pt_id}
+        )
+        
+        # Теперь можно удалить тип растения
         deleted = conn.execute(
             text("DELETE FROM plant_types WHERE id=:id"), {"id": pt_id}
         ).rowcount
+        
         if deleted == 0:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plant type not found")
+    
     logger.info("Тип растения %s удален из справочника", pt_id)
 
 
@@ -3473,7 +3503,7 @@ def list_overdue_reports(
                 g.name as greenhouse_name,
                 odr.plant_instance_id,
                 odr.plant_type_id,
-                pt.name as plant_name,
+                COALESCE(odr.plant_type_name, pt.name) as plant_name,
                 odr.report_type,
                 odr.days_overdue,
                 odr.created_at,
@@ -3556,7 +3586,7 @@ def get_greenhouse_overdue_reports(
                 g.name as greenhouse_name,
                 odr.plant_instance_id,
                 odr.plant_type_id,
-                pt.name as plant_name,
+                COALESCE(odr.plant_type_name, pt.name) as plant_name,
                 odr.report_type,
                 odr.days_overdue,
                 odr.created_at,
@@ -3592,6 +3622,7 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                 SELECT 
                     pi.id as plant_instance_id,
                     pi.plant_type_id,
+                    pt.name as plant_type_name,
                     pt.watering_interval_days,
                     MAX(we.created_at) as last_watering
                 FROM plant_instances pi
@@ -3600,7 +3631,7 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                     AND we.type = 'watering'
                 WHERE pi.greenhouse_id = :gh_id
                     AND pt.watering_interval_days IS NOT NULL
-                GROUP BY pi.id, pi.plant_type_id, pt.watering_interval_days
+                GROUP BY pi.id, pi.plant_type_id, pt.name, pt.watering_interval_days
             """
             ),
             {"gh_id": greenhouse_id},
@@ -3698,10 +3729,10 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                                                 text(
                                                     """
                                                     INSERT INTO overdue_reports (
-                                                        id, greenhouse_id, plant_instance_id, plant_type_id,
+                                                        id, greenhouse_id, plant_instance_id, plant_type_id, plant_type_name,
                                                         report_type, days_overdue, created_at
                                                     )
-                                                    VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                                    VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id, :plant_type_name,
                                                             'watering_overdue', :days_overdue, :created_at)
                                                 """
                                                 ),
@@ -3710,6 +3741,7 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                                                     "gh_id": greenhouse_id,
                                                     "plant_instance_id": plant_instance_id,
                                                     "plant_type_id": plant["plant_type_id"],
+                                                    "plant_type_name": plant.get("plant_type_name"),
                                                     "days_overdue": days_overdue_before,
                                                     "created_at": last_date,
                                                 },
@@ -3766,10 +3798,10 @@ def recalculate_watering_days_for_greenhouse(greenhouse_id: str):
                                     text(
                                         """
                                         INSERT INTO overdue_reports (
-                                            id, greenhouse_id, plant_instance_id, plant_type_id,
+                                            id, greenhouse_id, plant_instance_id, plant_type_id, plant_type_name,
                                             report_type, days_overdue
                                         )
-                                        VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                        VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id, :plant_type_name,
                                                 'watering_overdue', :days_overdue)
                                     """
                                     ),
@@ -3836,6 +3868,7 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                 SELECT 
                     pi.id as plant_instance_id,
                     pi.plant_type_id,
+                    pt.name as plant_type_name,
                     pt.fertilizing_interval_days,
                     MAX(we.created_at) as last_fertilizing
                 FROM plant_instances pi
@@ -3844,7 +3877,7 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                     AND we.type = 'fertilizing'
                 WHERE pi.greenhouse_id = :gh_id
                     AND pt.fertilizing_interval_days IS NOT NULL
-                GROUP BY pi.id, pi.plant_type_id, pt.fertilizing_interval_days
+                GROUP BY pi.id, pi.plant_type_id, pt.name, pt.fertilizing_interval_days
             """
             ),
             {"gh_id": greenhouse_id},
@@ -3942,10 +3975,10 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                                                 text(
                                                     """
                                                     INSERT INTO overdue_reports (
-                                                        id, greenhouse_id, plant_instance_id, plant_type_id,
+                                                        id, greenhouse_id, plant_instance_id, plant_type_id, plant_type_name,
                                                         report_type, days_overdue, created_at
                                                     )
-                                                    VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                                    VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id, :plant_type_name,
                                                             'fertilizing_overdue', :days_overdue, :created_at)
                                                 """
                                                 ),
@@ -3954,6 +3987,7 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                                                     "gh_id": greenhouse_id,
                                                     "plant_instance_id": plant_instance_id,
                                                     "plant_type_id": plant["plant_type_id"],
+                                                    "plant_type_name": plant.get("plant_type_name"),
                                                     "days_overdue": days_overdue_before,
                                                     "created_at": last_date,
                                                 },
@@ -4010,10 +4044,10 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                                     text(
                                         """
                                         INSERT INTO overdue_reports (
-                                            id, greenhouse_id, plant_instance_id, plant_type_id,
+                                            id, greenhouse_id, plant_instance_id, plant_type_id, plant_type_name,
                                             report_type, days_overdue
                                         )
-                                        VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                        VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id, :plant_type_name,
                                                 'fertilizing_overdue', :days_overdue)
                                     """
                                     ),
@@ -4022,6 +4056,7 @@ def recalculate_fertilizing_days_for_greenhouse(greenhouse_id: str):
                                         "gh_id": greenhouse_id,
                                         "plant_instance_id": plant_instance_id,
                                         "plant_type_id": plant["plant_type_id"],
+                                        "plant_type_name": plant.get("plant_type_name"),
                                         "days_overdue": days_overdue,
                                     },
                                 )
@@ -4173,10 +4208,10 @@ def check_watering_schedules():
                             text(
                                 """
                                 INSERT INTO overdue_reports (
-                                    id, greenhouse_id, plant_instance_id, plant_type_id,
+                                    id, greenhouse_id, plant_instance_id, plant_type_id, plant_type_name,
                                     report_type, days_overdue
                                 )
-                                VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id, :plant_type_name,
                                         'watering_overdue', :days_overdue)
                             """
                             ),
@@ -4185,6 +4220,7 @@ def check_watering_schedules():
                                 "gh_id": gh_id,
                                 "plant_instance_id": row["plant_instance_id"],
                                 "plant_type_id": row["plant_type_id"],
+                                "plant_type_name": row.get("plant_name"),
                                 "days_overdue": days_overdue,
                             },
                         )
@@ -4373,10 +4409,10 @@ def check_watering_schedules():
                             text(
                                 """
                                 INSERT INTO overdue_reports (
-                                    id, greenhouse_id, plant_instance_id, plant_type_id,
+                                    id, greenhouse_id, plant_instance_id, plant_type_id, plant_type_name,
                                     report_type, days_overdue
                                 )
-                                VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id,
+                                VALUES (:id, :gh_id, :plant_instance_id, :plant_type_id, :plant_type_name,
                                         'fertilizing_overdue', :days_overdue)
                             """
                             ),
@@ -4385,6 +4421,7 @@ def check_watering_schedules():
                                 "gh_id": gh_id,
                                 "plant_instance_id": row["plant_instance_id"],
                                 "plant_type_id": row["plant_type_id"],
+                                "plant_type_name": row.get("plant_name"),
                                 "days_overdue": days_overdue,
                             },
                         )
