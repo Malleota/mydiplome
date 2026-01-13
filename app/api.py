@@ -1145,6 +1145,22 @@ def list_workers(current_user: dict = Depends(get_current_user)):
 
 
 # --- Plant types ---
+def validate_plant_image_url(image_url: Optional[str]) -> Optional[str]:
+    """Валидирует, что image_url для растений указывает на правильную папку."""
+    if not image_url:
+        return None
+    # Если это полный URL (http/https), пропускаем
+    if image_url.startswith("http://") or image_url.startswith("https://"):
+        return image_url
+    # Для относительных путей проверяем, что они из правильной папки
+    if not image_url.startswith("/static/plant-types/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Изображение для типа растения должно находиться в папке /static/plant-types/",
+        )
+    return image_url
+
+
 @router.get("/plant-types", response_model=List[PlantTypeOut])
 def list_plant_types(current_user: dict = Depends(get_current_user)):
     with engine.connect() as conn:
@@ -1208,6 +1224,9 @@ async def upload_plant_image(
 @router.post("/plant-types", response_model=PlantTypeOut, status_code=201)
 def create_plant_type(payload: PlantTypeCreate, admin: dict = Depends(require_admin)):
     """Добавление растения в справочник. Доступ: admin."""
+    # Валидируем image_url
+    validated_image_url = validate_plant_image_url(payload.image_url)
+    
     pt_id = new_id()
     with engine.begin() as conn:
         conn.execute(
@@ -1224,7 +1243,7 @@ def create_plant_type(payload: PlantTypeCreate, admin: dict = Depends(require_ad
                 "id": pt_id,
                 "name": payload.name,
                 "description": payload.description,
-                "img_url": payload.image_url,
+                "img_url": validated_image_url,
                 "tmin": payload.temp_min,
                 "tmax": payload.temp_max,
                 "hmin": payload.humidity_min,
@@ -1300,8 +1319,10 @@ def update_plant_type(
             params["description"] = payload.description
         
         if payload.image_url is not None:
+            # Валидируем image_url
+            validated_image_url = validate_plant_image_url(payload.image_url)
             update_fields.append("image_url = :img_url")
-            params["img_url"] = payload.image_url
+            params["img_url"] = validated_image_url
         
         if payload.temp_min is not None:
             update_fields.append("temp_min = :tmin")

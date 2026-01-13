@@ -27,6 +27,16 @@ def get_default_greenhouse_images():
     ]
 
 
+def get_default_plant_type_images():
+    """Возвращает список базовых изображений для типов растений."""
+    # Используем локальные пути на сервере
+    return [
+        ("plant_1", "/static/plant-types/plant_1.png", "Plant 1"),
+        ("plant_2", "/static/plant-types/plant_2.png", "Plant 2"),
+        ("plant_3", "/static/plant-types/plant_3.png", "Plant 3"),
+    ]
+
+
 def get_schema_statements():
     """Возвращает список SQL-запросов для создания таблиц."""
     return [

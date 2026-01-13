@@ -4,6 +4,7 @@ from sqlalchemy import text
 
 from app.config import engine
 from app.dependencies import new_id, get_password_hash
+from database import get_default_plant_type_images
 
 
 def populate_database():
@@ -63,11 +64,13 @@ def populate_database():
         
         # 2. Типы растений
         print("Создаю типы растений...")
+        default_images = get_default_plant_type_images()
         plant_types = [
             {
                 "id": new_id(),
                 "name": "Томаты",
                 "description": "Помидоры черри",
+                "image_url": default_images[0][1] if len(default_images) > 0 else None,  # plant_1.png
                 "temp_min": 18.0,
                 "temp_max": 25.0,
                 "humidity_min": 60.0,
@@ -79,6 +82,7 @@ def populate_database():
                 "id": new_id(),
                 "name": "Огурцы",
                 "description": "Огурцы для теплицы",
+                "image_url": default_images[1][1] if len(default_images) > 1 else None,  # plant_2.png
                 "temp_min": 20.0,
                 "temp_max": 28.0,
                 "humidity_min": 70.0,
@@ -90,6 +94,7 @@ def populate_database():
                 "id": new_id(),
                 "name": "Перец",
                 "description": "Болгарский перец",
+                "image_url": default_images[2][1] if len(default_images) > 2 else None,  # plant_3.png
                 "temp_min": 22.0,
                 "temp_max": 26.0,
                 "humidity_min": 65.0,
@@ -104,9 +109,9 @@ def populate_database():
             try:
                 conn.execute(
                     text("""
-                        INSERT INTO plant_types (id, name, description, temp_min, temp_max, 
+                        INSERT INTO plant_types (id, name, description, image_url, temp_min, temp_max, 
                                                  humidity_min, humidity_max, watering_interval_days, fertilizing_interval_days)
-                        VALUES (:id, :name, :description, :temp_min, :temp_max, 
+                        VALUES (:id, :name, :description, :image_url, :temp_min, :temp_max, 
                                 :humidity_min, :humidity_max, :watering_interval_days, :fertilizing_interval_days)
                     """),
                     pt
