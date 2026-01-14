@@ -34,6 +34,12 @@ def get_default_plant_type_images():
         ("plant_1", "/static/plant-types/plant_1.png", "Plant 1"),
         ("plant_2", "/static/plant-types/plant_2.png", "Plant 2"),
         ("plant_3", "/static/plant-types/plant_3.png", "Plant 3"),
+        ("plant_4", "/static/plant-types/plant_4.png", "Plant 4"),
+        ("plant_5", "/static/plant-types/plant_5.png", "Plant 5"),
+        ("plant_6", "/static/plant-types/plant_6.png", "Plant 6"),
+        ("plant_7", "/static/plant-types/plant_7.png", "Plant 7"),
+        ("plant_8", "/static/plant-types/plant_8.png", "Plant 8"),
+        ("plant_9", "/static/plant-types/plant_9.png", "Plant 9"),
     ]
 
 
